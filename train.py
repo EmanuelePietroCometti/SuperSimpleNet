@@ -392,21 +392,7 @@ def main_mvtec(device, config):
     config["ratio"] = 1
 
     categories = [
-        "screw",
-        "pill",
-        "capsule",
-        "carpet",
-        "grid",
-        "tile",
-        "wood",
-        "zipper",
-        "cable",
-        "toothbrush",
-        "transistor",
-        "metal_nut",
-        "bottle",
-        "hazelnut",
-        "leather",
+        "first_test"
     ]
 
     results_writer = ResultsWriter(
@@ -435,7 +421,7 @@ def main_mvtec(device, config):
         model = SuperSimpleNet(image_size=config["image_size"], config=config)
 
         datamodule = MVTec(
-            root=Path(config["datasets_folder"]) / "mvtec",
+            root=Path(config["datasets_folder"]),
             category=category,
             image_size=config["image_size"],
             train_batch_size=config["batch"],
@@ -664,7 +650,7 @@ def run_unsup(data_name):
 
     config = {
         "wandb_project": "ssn",
-        "datasets_folder": Path("./datasets"),
+        "datasets_folder": Path("./dataset"),
         "num_workers": 8,
         "setup_name": "superSimpleNet",
         "backbone": "wide_resnet50_2",
@@ -678,9 +664,9 @@ def run_unsup(data_name):
         "adapt_cls_feat": False,  # (JIMS extension) cls features are not adapted
         "noise_std": 0.015,
         # "perlin_thr": x,
-        "image_size": (256, 256),
+        "image_size": (512, 512),
         "seed": 42,
-        "batch": 32,
+        "batch": 16,
         "epochs": 300,
         "flips": False,  # makes no difference, just faster if false to avoid computation
         "seg_lr": 0.0002,
@@ -704,7 +690,7 @@ def run_sup(data_name):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     config = {
         "wandb_project": "ssn",
-        "datasets_folder": Path("./datasets"),
+        "datasets_folder": Path("./dataset"),
         "num_workers": 1,
         "setup_name": "superSimpleNet",
         "dt": (3, 2),   # distance transform

@@ -43,7 +43,10 @@ class MVTECDataset(SSNDataset):
         self.root_category = Path(root) / Path(category)
 
     def make_dataset(self) -> tuple[DataFrame, DataFrame]:
-        samples = make_mvtec_dataset(self.root_category, self.split)
+        # Estraiamo la stringa esatta ("train" o "test") per bypassare il bug di Pandas
+        split_name = self.split.value if hasattr(self.split, "value") else str(self.split)
+        
+        samples = make_mvtec_dataset(self.root_category, split_name)
         # return empty for anomalous
         return samples, pd.DataFrame()
 
