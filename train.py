@@ -33,7 +33,7 @@ from model.supersimplenet import SuperSimpleNet
 from common.visualizer import Visualizer
 from common.results_writer import ResultsWriter
 from common.loss import focal_loss
-from datamodules.custom import CustomDataModule
+from datamodules.active_learning import ActiveLearningDataModule
 from active_sampler import extract_active_samples
 
 
@@ -53,6 +53,7 @@ def train(
 
     model.train()
     train_loader = datamodule.train_dataloader()
+    results = {}
     for epoch in range(epochs):
         model.train()
         total_loss = 0
@@ -785,7 +786,7 @@ def train_custom_unsup(dataset_path: str, use_masks: bool = True) -> str:
     }
     
     model = SuperSimpleNet(image_size=config["image_size"], config=config)
-    datamodule = CustomDataModule(
+    datamodule = ActiveLearningDataModule(
         root=root_path, 
         mode="unsup", 
         image_size=config["image_size"], 
@@ -853,7 +854,7 @@ def train_custom_sup(dataset_path: str, weights_path: str = None, use_masks: boo
     else:
         print("Warning: Unsupervised weights not found. Training from scratch.")
         
-    datamodule = CustomDataModule(
+    datamodule = ActiveLearningDataModule(
         root=root_path, 
         mode="sup", 
         image_size=config["image_size"], 
