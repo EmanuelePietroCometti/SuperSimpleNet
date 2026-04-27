@@ -34,6 +34,7 @@ from common.visualizer import Visualizer
 from common.results_writer import ResultsWriter
 from common.loss import focal_loss
 from datamodules.custom import CustomDataModule
+from active_sampler import extract_active_samples
 
 
 def train(
@@ -323,7 +324,7 @@ def test(
     return results_dict
 
 
-def train_and_eval(model, datamodule, config, device):
+def train_and_eval(model, datamodule, config, device, use_masks: bool = True):
     if LOG_WANDB:
         os.environ["WANDB__SERVICE_WAIT"] = "300"
         wandb.init(project=config["wandb_project"], config=config, name=config["name"])
@@ -332,11 +333,15 @@ def train_and_eval(model, datamodule, config, device):
         "I-AUROC": AUROC(),
         "AP-det": AveragePrecision(num_classes=1),
     }
-    pixel_metrics = {
-        "P-AUROC": AUROC(),
-        "AUPRO": AUPRO(),
-        "AP-loc": AveragePrecision(num_classes=1),
-    }
+
+    if use_masks:
+        pixel_metrics = {
+            "P-AUROC": AUROC(),
+            "AUPRO": AUPRO(),
+            "AP-loc": AveragePrecision(num_classes=1),
+        }
+    else:
+        pixel_metrics = {}
 
     train(
         model=model,
@@ -737,7 +742,7 @@ def run_sup(data_name):
         )
 
 
-def train_custom_unsup(dataset_path: str) -> str:
+def train_custom_unsup(dataset_path: str, use_masks: bool = True) -> str:
     """
     Executes ONLY the unsupervised training phase on normal samples.
     """
@@ -790,7 +795,7 @@ def train_custom_unsup(dataset_path: str) -> str:
     )
     datamodule.setup()
     
-    train_and_eval(model=model, datamodule=datamodule, config=config, device=device)
+    train_and_eval(model=model, datamodule=datamodule, config=config, device=device, use_masks=use_masks)
     print("\n[!] Unsupervised training complete. Weights saved.")
     
     # Return the path where weights were saved so the full pipeline can use it automatically
@@ -798,7 +803,7 @@ def train_custom_unsup(dataset_path: str) -> str:
     return str(weights_path)
 
 
-def train_custom_sup(dataset_path: str, weights_path: str = None):
+def train_custom_sup(dataset_path: str, weights_path: str = None, use_masks: bool = True):
     """
     Executes ONLY the supervised fine-tuning phase on hard-negative samples.
     """
@@ -858,49 +863,83 @@ def train_custom_sup(dataset_path: str, weights_path: str = None):
     )
     datamodule.setup()
     
-    train_and_eval(model=model, datamodule=datamodule, config=config, device=device)
+    train_and_eval(model=model, datamodule=datamodule, config=config, device=device, use_masks=use_masks)
     print("\nSupervised fine-tuning completed successfully!")
 
 
-def run_custom_pipeline(dataset_path: str):
+def run_active_learning_master(dataset_path: str, use_masks: bool = True):
     """
-    Executes the full two-phase training pipeline interactively.
+    Esegue l'intera pipeline di Active Learning: 
+    Unsupervised -> Active Sampling -> Pausa -> Supervised
     """
-    # Unsupervised phase
-    saved_weights_path = train_custom_unsup(dataset_path)
+    root_path = Path(dataset_path)
     
-    print(f"\nPlease review the results and place misclassified images in: {Path(dataset_path) / 'misclassified' / 'images'}")
-    print(f"Place their corresponding masks in: {Path(dataset_path) / 'misclassified' / 'masks'}")
-    input("Press ENTER when you have populated the folders to start Supervised fine-tuning...")
+    saved_weights_path = train_custom_unsup(dataset_path, use_masks=use_masks)
+    
+    pool_dir = root_path / "unlabeled_pool"
+    active_pool_dir = root_path / "active_pool"
+    
+    if pool_dir.exists() and any(pool_dir.iterdir()):
+        print("\n--- AVVIO RICERCA ATTIVA NEL POOL ---")
+        extract_active_samples(
+            model_weights_path=saved_weights_path,
+            unlabeled_pool_dir=str(pool_dir),
+            output_misclassified_dir=str(active_pool_dir),
+            budget=20,
+            threshold=0.5
+        )
+        
+        print(f"\n[AZIONE RICHIESTA] Le immagini più critiche sono in: {active_pool_dir / 'images'}")
+        if use_masks:
+            print(f"Crea le maschere SOLO per i difetti (in formato .bmp) in: {active_pool_dir / 'masks'}")
+            
+        input(">>> Premi INVIO quando hai finito di gestire i campioni per avviare il Fine-Tuning... <<<")
+    else:
+        print("\nCartella 'unlabeled_pool' non trovata o vuota. Salto l'estrazione attiva.")
 
-    # Supervised phase
-    train_custom_sup(dataset_path, saved_weights_path)
+    train_custom_sup(dataset_path, saved_weights_path, use_masks=use_masks)
+    
+    print("\n[PIPELINE COMPLETATA] Il modello è stato aggiornato con successo.")
 
 
 def main():
     """
-    Main entry point for command line arguments.
-    Usage: python train.py <mode: full|unsup|sup|mvtec|visa|etc> <dataset_path> [weights_path]
+    Punto di ingresso principale. Gestisce i flag da riga di comando per permetterti
+    di eseguire blocchi separati della pipeline.
     """
-    if len(sys.argv) < 2:
-        print("Usage: python train.py <mode> <dataset_path_for_custom> [weights_path]")
+    import sys
+    if len(sys.argv) < 3:
+        print("Uso: python train.py <mode> <dataset_path> [weights_path] [--no-masks]")
+        print("\nModalità:")
+        print("  unsup  : Solo addestramento non supervisionato")
+        print("  sup    : Solo addestramento supervisionato (richiede il percorso dei pesi)")
+        print("  master : Pipeline completa di Active Learning (Unsup -> Sampler -> Sup)")
         sys.exit(1)
 
     mode = sys.argv[1]
+    dataset_path = sys.argv[2]
     
-    if mode == "full":
-        run_custom_pipeline(sys.argv[2])
+    use_masks = "--no-masks" not in sys.argv
+    args = [arg for arg in sys.argv if arg != "--no-masks"]
+
+    if mode == "master":
+        run_active_learning_master(dataset_path, use_masks=use_masks)
+        
     elif mode == "unsup":
-        train_custom_unsup(sys.argv[2])
+        train_custom_unsup(dataset_path, use_masks=use_masks)
+        
     elif mode == "sup":
-        # Check if an optional weight path is provided
-        w_path = sys.argv[3] if len(sys.argv) > 3 else None
-        train_custom_sup(sys.argv[2], w_path)
+        if len(args) < 4:
+            print("\n[ERRORE] Per eseguire SOLO la fase 'sup', devi fornire i pesi pre-addestrati.")
+            print("Esempio: python train.py sup ./dataset ./results/.../weights.pt")
+            sys.exit(1)
+            
+        w_path = args[3]
+        train_custom_sup(dataset_path, weights_path=w_path, use_masks=use_masks)
+        
     else:
-        # Fallback for standard datasets (e.g., mvtec, visa)
         run_unsup(mode)
         run_sup(mode)
-
 
 if __name__ == "__main__":
     main()

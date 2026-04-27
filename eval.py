@@ -18,6 +18,7 @@ from datamodules.visa import Visa
 from datamodules.ksdd2 import KSDD2
 from datamodules.sensum import Sensum
 from model.supersimplenet import SuperSimpleNet
+from datamodules.custom import CustomDataModule
 
 
 @torch.no_grad()
@@ -277,6 +278,19 @@ def get_visa(config):
     return data
 
 
+def get_custom(config):
+    datamodule = CustomDataModule(
+        root=Path(config["datasets_folder"]),
+        mode="unsup",
+        image_size=config["image_size"] if "image_size" in config else (256, 256),
+        eval_batch_size=config["batch"],
+        num_workers=config["num_workers"]
+    )
+    datamodule.setup()
+    
+    # Restituisce una tupla con la categoria ("custom") e il modulo
+    return [("custom_data", datamodule)]
+
 def get_avg(df):
     cat_avg = df.groupby("category").mean(numeric_only=True)
     total_avg = df.mean(axis=0, numeric_only=True).to_frame().T
@@ -389,6 +403,7 @@ def run_eval(datasets, ratios, run_id, res_path):
         "ksdd2": get_ksdd2,
         "mvtec": get_mvtec,
         "visa": get_visa,
+        "custom": get_custom,
     }
 
     for dataset, ratio in zip(datasets, ratios):
@@ -426,11 +441,15 @@ def run_eval(datasets, ratios, run_id, res_path):
                 "I-AUROC": AUROC(),
                 "AP-det": AveragePrecision(num_classes=1),
             }
-            pixel_metrics = {
-                "P-AUROC": AUROC(),
-                "AP-loc": AveragePrecision(num_classes=1),
-                "AUPRO": AUPRO(),  # aupro calculation can be slow, and it requires some gpu memory
-            }
+            
+            if dataset == "custom": 
+                pixel_metrics = {}
+            else:
+                pixel_metrics = {
+                    "P-AUROC": AUROC(),
+                    "AP-loc": AveragePrecision(num_classes=1),
+                    "AUPRO": AUPRO(),  
+                }
 
             results = eval(
                 model=model,
