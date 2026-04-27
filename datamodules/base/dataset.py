@@ -328,7 +328,14 @@ class SSNDataset(Dataset):
             # normal or not segmented are all zero
             mask = np.zeros(shape=image.shape[:2])
         else:
-            mask = cv2.imread(mask_path, flags=0) / 255.0
+            if mask_path == "" or mask_path is None:
+                mask = np.zeros(image.shape[:2], dtype=np.float32)
+            else:
+                mask_img = cv2.imread(mask_path, flags=0)
+                if mask_img is None:
+                    mask = np.zeros(image.shape[:2], dtype=np.float32)
+                else:
+                    mask = mask_img / 255.0
 
             if self.dilate is not None and self.split == Split.TRAIN:
                 mask = cv2.dilate(mask, np.ones((self.dilate, self.dilate)))

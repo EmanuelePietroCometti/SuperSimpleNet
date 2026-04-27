@@ -33,6 +33,7 @@ from model.supersimplenet import SuperSimpleNet
 from common.visualizer import Visualizer
 from common.results_writer import ResultsWriter
 from common.loss import focal_loss
+from datamodules.custom import CustomDataModule
 
 
 def train(
@@ -644,7 +645,6 @@ def main_sensum(device, config, supervision):
                 / str(config["ratio"])
             )
 
-
 def run_unsup(data_name):
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -654,7 +654,7 @@ def run_unsup(data_name):
         "num_workers": 8,
         "setup_name": "superSimpleNet",
         "backbone": "wide_resnet50_2",
-        "layers": ["layer2", "layer3"],
+        "layers": ["layer1", "layer2", "layer3"],
         "patch_size": 3,
         "noise": True,
         "perlin": True,
@@ -696,7 +696,7 @@ def run_sup(data_name):
         "dt": (3, 2),   # distance transform
         "dilate": 7,    # dilate mask
         "backbone": "wide_resnet50_2",
-        "layers": ["layer2", "layer3"],
+        "layers": ["layer1", "layer2", "layer3"],
         "patch_size": 3,
         "noise": True,
         "perlin": True,
@@ -706,9 +706,9 @@ def run_sup(data_name):
         "adapt_cls_feat": False,  # (JIMS extension) cls features are not adapted
         "noise_std": 0.015,
         "perlin_thr": 0.6,
-        "seed": 456654,
-        "batch": 32,
-        "epochs": 300,
+        "seed": 42,
+        "batch": 2,
+        "epochs": 1,
         "flips": True,
         "seg_lr": 0.0002,
         "dec_lr": 0.0002,
@@ -737,9 +737,169 @@ def run_sup(data_name):
         )
 
 
+def train_custom_unsup(dataset_path: str) -> str:
+    """
+    Executes ONLY the unsupervised training phase on normal samples.
+    """
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    root_path = Path(dataset_path)
+    
+    print("\n--- STARTING UNSUPERVISED TRAINING ---")
+    config = {
+        "wandb_project": "ssn",
+        "setup_name": "custom_unsup",
+        "dataset": "custom",
+        "category": "custom_data",
+        "ratio": 0,
+        "backbone": "wide_resnet50_2",
+        "layers": ["layer1", "layer2", "layer3"],
+        "patch_size": 3,
+        "noise": True,
+        "perlin": True,
+        "no_anomaly": "empty",
+        "bad": True,
+        "overlap": True,
+        "adapt_cls_feat": False,
+        "noise_std": 0.015,
+        "perlin_thr": 0.2,
+        "image_size": (256, 256),
+        "seed": 42,
+        "batch": 8,
+        "epochs": 1,
+        "flips": False,
+        "seg_lr": 0.0002,
+        "dec_lr": 0.0002,
+        "adapt_lr": 0.0001,
+        "gamma": 0.4,
+        "stop_grad": True,
+        "clip_grad": False,
+        "eval_step_size": 1,
+        "num_workers": 8,
+        "results_save_path": Path("./results"),
+        "name": "custom_unsup_phase"
+    }
+    
+    model = SuperSimpleNet(image_size=config["image_size"], config=config)
+    datamodule = CustomDataModule(
+        root=root_path, 
+        mode="unsup", 
+        image_size=config["image_size"], 
+        train_batch_size=config["batch"], 
+        eval_batch_size=config["batch"], 
+        num_workers=config["num_workers"]
+    )
+    datamodule.setup()
+    
+    train_and_eval(model=model, datamodule=datamodule, config=config, device=device)
+    print("\n[!] Unsupervised training complete. Weights saved.")
+    
+    # Return the path where weights were saved so the full pipeline can use it automatically
+    weights_path = Path(config["results_save_path"]) / config["setup_name"] / "checkpoints" / config["dataset"] / config["category"] / str(config["ratio"]) / "weights.pt"
+    return str(weights_path)
+
+
+def train_custom_sup(dataset_path: str, weights_path: str = None):
+    """
+    Executes ONLY the supervised fine-tuning phase on hard-negative samples.
+    """
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    root_path = Path(dataset_path)
+
+    print("\n--- STARTING SUPERVISED FINE-TUNING ON HARD NEGATIVES ---")
+    config = {
+        "wandb_project": "ssn",
+        "setup_name": "custom_sup",
+        "dataset": "custom",
+        "category": "custom_data",
+        "backbone": "wide_resnet50_2",
+        "layers": ["layer1", "layer2", "layer3"],
+        "patch_size": 3,
+        "noise": True,
+        "perlin": True,
+        "no_anomaly": "empty",
+        "bad": True,
+        "overlap": False,
+        "adapt_cls_feat": False,
+        "noise_std": 0.015,
+        "image_size": (256, 256),
+        "seed": 42,
+        "batch": 8,
+        "seg_lr": 0.0002,
+        "dec_lr": 0.0002,
+        "adapt_lr": 0.0001,
+        "gamma": 0.4,
+        "results_save_path": Path("./results"),
+        "epochs": 1,            # Adjust this as needed for fine-tuning
+        "num_workers": 1,       # MUST be 1 for SSN supervised frequency tracking
+        "stop_grad": False,     # Train discriminator completely
+        "clip_grad": True,      # Avoid gradient explosion
+        "flips": True,          # Add augmentation
+        "perlin_thr": 0.6,
+        "ratio": 1,             # Flag for supervised
+        "name": "custom_sup_phase"
+    }
+    
+    model = SuperSimpleNet(image_size=config["image_size"], config=config)
+    
+    # Load unsupervised weights if provided to refine the boundaries
+    if weights_path and Path(weights_path).exists():
+        print(f"Loading weights from {weights_path}")
+        model.load_model(Path(weights_path))
+    else:
+        print("Warning: Unsupervised weights not found. Training from scratch.")
+        
+    datamodule = CustomDataModule(
+        root=root_path, 
+        mode="sup", 
+        image_size=config["image_size"], 
+        train_batch_size=config["batch"], 
+        eval_batch_size=config["batch"], 
+        num_workers=config["num_workers"]
+    )
+    datamodule.setup()
+    
+    train_and_eval(model=model, datamodule=datamodule, config=config, device=device)
+    print("\nSupervised fine-tuning completed successfully!")
+
+
+def run_custom_pipeline(dataset_path: str):
+    """
+    Executes the full two-phase training pipeline interactively.
+    """
+    # Unsupervised phase
+    saved_weights_path = train_custom_unsup(dataset_path)
+    
+    print(f"\nPlease review the results and place misclassified images in: {Path(dataset_path) / 'misclassified' / 'images'}")
+    print(f"Place their corresponding masks in: {Path(dataset_path) / 'misclassified' / 'masks'}")
+    input("Press ENTER when you have populated the folders to start Supervised fine-tuning...")
+
+    # Supervised phase
+    train_custom_sup(dataset_path, saved_weights_path)
+
+
 def main():
-    run_unsup(sys.argv[1])
-    run_sup(sys.argv[1])
+    """
+    Main entry point for command line arguments.
+    Usage: python train.py <mode: full|unsup|sup|mvtec|visa|etc> <dataset_path> [weights_path]
+    """
+    if len(sys.argv) < 2:
+        print("Usage: python train.py <mode> <dataset_path_for_custom> [weights_path]")
+        sys.exit(1)
+
+    mode = sys.argv[1]
+    
+    if mode == "full":
+        run_custom_pipeline(sys.argv[2])
+    elif mode == "unsup":
+        train_custom_unsup(sys.argv[2])
+    elif mode == "sup":
+        # Check if an optional weight path is provided
+        w_path = sys.argv[3] if len(sys.argv) > 3 else None
+        train_custom_sup(sys.argv[2], w_path)
+    else:
+        # Fallback for standard datasets (e.g., mvtec, visa)
+        run_unsup(mode)
+        run_sup(mode)
 
 
 if __name__ == "__main__":
