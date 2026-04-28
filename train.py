@@ -831,6 +831,7 @@ def train_custom_sup(dataset_path: str, weights_path: str = None, use_masks: boo
         "seed": 42,
         "batch": 8,
         "seg_lr": 0.0002,
+        "eval_step_size": 1,
         "dec_lr": 0.0002,
         "adapt_lr": 0.0001,
         "gamma": 0.4,
@@ -870,8 +871,8 @@ def train_custom_sup(dataset_path: str, weights_path: str = None, use_masks: boo
 
 def run_active_learning_master(dataset_path: str, use_masks: bool = True):
     """
-    Esegue l'intera pipeline di Active Learning: 
-    Unsupervised -> Active Sampling -> Pausa -> Supervised
+    Executes the entire Active Learning pipeline: 
+    Unsupervised -> Active Sampling -> Pause -> Supervised
     """
     root_path = Path(dataset_path)
     
@@ -881,7 +882,7 @@ def run_active_learning_master(dataset_path: str, use_masks: bool = True):
     active_pool_dir = root_path / "active_pool"
     
     if pool_dir.exists() and any(pool_dir.iterdir()):
-        print("\n--- AVVIO RICERCA ATTIVA NEL POOL ---")
+        print("\n--- STARTING ACTIVE SEARCH IN POOL ---")
         extract_active_samples(
             model_weights_path=saved_weights_path,
             unlabeled_pool_dir=str(pool_dir),
@@ -890,31 +891,31 @@ def run_active_learning_master(dataset_path: str, use_masks: bool = True):
             threshold=0.5
         )
         
-        print(f"\n[AZIONE RICHIESTA] Le immagini più critiche sono in: {active_pool_dir / 'images'}")
+        print(f"\n[ACTION REQUIRED] The most critical images are located in: {active_pool_dir / 'images'}")
         if use_masks:
-            print(f"Crea le maschere SOLO per i difetti (in formato .bmp) in: {active_pool_dir / 'masks'}")
+            print(f"Create masks ONLY for defects (in .bmp format) in: {active_pool_dir / 'masks'}")
             
-        input(">>> Premi INVIO quando hai finito di gestire i campioni per avviare il Fine-Tuning... <<<")
+        input(">>> Press ENTER when you have finished managing the samples to start Fine-Tuning... <<<")
     else:
-        print("\nCartella 'unlabeled_pool' non trovata o vuota. Salto l'estrazione attiva.")
+        print("\nFolder 'unlabeled_pool' not found or empty. Skipping active extraction.")
 
     train_custom_sup(dataset_path, saved_weights_path, use_masks=use_masks)
     
-    print("\n[PIPELINE COMPLETATA] Il modello è stato aggiornato con successo.")
+    print("\n[PIPELINE COMPLETED] The model has been successfully updated.")
 
 
 def main():
     """
-    Punto di ingresso principale. Gestisce i flag da riga di comando per permetterti
-    di eseguire blocchi separati della pipeline.
+    Main entry point. Handles command-line flags to allow 
+    the execution of separate pipeline blocks.
     """
     import sys
     if len(sys.argv) < 3:
-        print("Uso: python train.py <mode> <dataset_path> [weights_path] [--no-masks]")
-        print("\nModalità:")
-        print("  unsup  : Solo addestramento non supervisionato")
-        print("  sup    : Solo addestramento supervisionato (richiede il percorso dei pesi)")
-        print("  master : Pipeline completa di Active Learning (Unsup -> Sampler -> Sup)")
+        print("Usage: python train.py <mode> <dataset_path> [weights_path] [--no-masks]")
+        print("\nModes:")
+        print("  unsup  : Only unsupervised training")
+        print("  sup    : Only supervised training (requires weights path)")
+        print("  master : Complete Active Learning Pipeline (Unsup -> Sampler -> Sup)")
         sys.exit(1)
 
     mode = sys.argv[1]
@@ -931,8 +932,8 @@ def main():
         
     elif mode == "sup":
         if len(args) < 4:
-            print("\n[ERRORE] Per eseguire SOLO la fase 'sup', devi fornire i pesi pre-addestrati.")
-            print("Esempio: python train.py sup ./dataset ./results/.../weights.pt")
+            print("\n[ERROR] To execute ONLY the 'sup' phase, you must provide pre-trained weights.")
+            print("Example: python train.py sup ./dataset ./results/.../weights.pt")
             sys.exit(1)
             
         w_path = args[3]

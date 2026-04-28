@@ -78,10 +78,9 @@ def extract_active_samples(
         images = images.to(device)
         anomaly_map, score = model(images)
 
-        pooled_features = torch.nn.functional.adaptive_avg_pool2d(anomaly_map, (1, 1)).squeeze()
+        pooled_features = torch.nn.functional.adaptive_avg_pool2d(anomaly_map, (8, 8))
 
-        if pooled_features.dim() == 1:
-            pooled_features = pooled_features.unsqueeze(0)
+        pooled_features = pooled_features.reshape(images.size(0), -1)
 
         all_paths.extend(paths)
         all_scores.extend(torch.sigmoid(score).cpu().numpy())

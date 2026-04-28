@@ -4,7 +4,8 @@ import cv2
 import numpy as np
 from anomalib.data.utils import read_image
 from matplotlib import pyplot as plt
-
+import io
+from PIL import Image
 from tqdm import tqdm
 
 
@@ -66,13 +67,20 @@ class Visualizer:
 
             # subdir name is parent's name
             subdir_name = Path(image_path).parent.name
-            plot_name = f"{Path(image_path).stem}.png"
+            plot_name = f"{Path(image_path).stem}.bmp"
 
             # besides parent name also add anomalous or normal
             total_path = self.save_path / subdir_name / gt_label
             total_path.mkdir(exist_ok=True, parents=True)
 
-            plt.savefig(total_path / plot_name, bbox_inches="tight")
+            buf = io.BytesIO()
+            plt.savefig(buf, format="png", bbox_inches="tight")
+            buf.seek(0)
+
+            img = Image.open(buf).convert("RGB")
+            img.save(total_path / plot_name, format="BMP")
+
+            buf.close()
 
             ano_maps_dir = total_path / "anomaly_maps"
             ano_maps_dir.mkdir(exist_ok=True, parents=True)
