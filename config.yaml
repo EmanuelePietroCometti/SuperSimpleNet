@@ -1,0 +1,26 @@
+{
+  "random_seed": 42,
+  "train_good": [
+    { "source_dir": "training/good", "num_samples": 200 },
+    { "source_dir": "training/dust", "num_samples": 50 }
+  ],
+  "test_good": [
+    { "source_dir": "validation/good", "num_samples": 100 },
+    { "source_dir": "validation/dust", "num_samples": 25 }
+  ],
+  "test_reject": [
+    { "name": "paglie", "source_dir": "validation/paglie", "num_samples": 50 },
+    { "name": "nodi", "source_dir": "validation/nodi", "num_samples": 50 }
+  ],
+  "unlabeled_pool": {
+    "source_dirs": [
+      "validation/good",
+      "validation/dust",
+      "validation/paglie",
+      "validation/nodi"
+    ],
+    "take_all_remaining": false,
+    "num_samples": 200,
+    "budget_al": 120
+  }
+}
