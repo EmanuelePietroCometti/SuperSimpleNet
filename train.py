@@ -770,8 +770,8 @@ def train_custom_unsup(dataset_path: str, use_masks: bool = True) -> str:
         "perlin_thr": 0.2,
         "image_size": (256, 256),
         "seed": 42,
-        "batch": 8,
-        "epochs": 1,
+        "batch": 16,
+        "epochs": 100,
         "flips": False,
         "seg_lr": 0.0002,
         "dec_lr": 0.0002,
@@ -779,8 +779,8 @@ def train_custom_unsup(dataset_path: str, use_masks: bool = True) -> str:
         "gamma": 0.4,
         "stop_grad": True,
         "clip_grad": False,
-        "eval_step_size": 1,
-        "num_workers": 8,
+        "eval_step_size": 20,
+        "num_workers": 4,
         "results_save_path": Path("./results"),
         "name": "custom_unsup_phase"
     }
@@ -829,14 +829,14 @@ def train_custom_sup(dataset_path: str, weights_path: str = None, use_masks: boo
         "noise_std": 0.015,
         "image_size": (256, 256),
         "seed": 42,
-        "batch": 8,
+        "batch": 16,
         "seg_lr": 0.0002,
-        "eval_step_size": 1,
+        "eval_step_size": 10,
         "dec_lr": 0.0002,
         "adapt_lr": 0.0001,
         "gamma": 0.4,
         "results_save_path": Path("./results"),
-        "epochs": 1,            # Adjust this as needed for fine-tuning
+        "epochs": 30,            # Adjust this as needed for fine-tuning
         "num_workers": 1,       # MUST be 1 for SSN supervised frequency tracking
         "stop_grad": False,     # Train discriminator completely
         "clip_grad": True,      # Avoid gradient explosion
