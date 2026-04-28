@@ -385,18 +385,19 @@ def run_eval(datasets, ratios, run_id, res_path):
         res_path: path to where  results csv will be saved
     """
     config = {
-        "weights_path": Path(r"./weights"),
-        "datasets_folder": Path(r"./datasets"),
+        "datasets_folder": Path(r"./dataset"),
         "results_save_path": res_path,
-        "image_save_path": None,  # set to save images
-        "score_save_path": None,  # set to save scores
+        "image_save_path": None,
+        "score_save_path": None,
         "seed": 42,
         "batch": 8,
         "num_workers": 0,
         "run_id": str(run_id),
-        # "ratio": "1", # configured below in the loop if using extended version
-        "adapt_cls_feat": False,  # (JIMS extension) cls features are not adapted
-        # "adapt_cls_feat": True,
+        "adapt_cls_feat": False,
+        "backbone": "wide_resnet50_2",
+        "layers": ["layer1", "layer2", "layer3"],
+        "patch_size": 3,
+        "image_size": (256, 256),
     }
     data_functions = {
         "sensum": get_sensum,
@@ -426,14 +427,17 @@ def run_eval(datasets, ratios, run_id, res_path):
 
         for cat, datamodule in data_list:
             print("Evaluating", f"{dataset}-{cat}")
-            weight_path = (
-                config["weights_path"]
-                / config["run_id"]
-                / dataset
-                / cat
-                / config["ratio"]
-                / "weights.pt"
-            )
+            if dataset == "custom":
+                weight_path = Path(f"./results/custom_sup/checkpoints/custom/custom_data/{ratio}/weights.pt")
+            else:
+                weight_path = (
+                    config["weights_path"]
+                    / config["run_id"]
+                    / dataset
+                    / cat
+                    / config["ratio"]
+                    / "weights.pt"
+                )
             model = SuperSimpleNet(image_size=datamodule.image_size, config=config)
             model.load_model(weight_path)
 
@@ -493,8 +497,8 @@ def run_eval(datasets, ratios, run_id, res_path):
 
 
 if __name__ == "__main__":
-    datasets = ["mvtec", "visa", "ksdd2", "sensum"]
-    ratios = ["1", "1", "246", "1"]  # set ratios according to the datasets
+    datasets = ["custom"]
+    ratios = ["1"]  # set ratios according to the datasets
     # ratios = ["", "", "", ""]           # for ICPR (also set the adapt_cls_feat to True in config above!!!)
 
     res_path = Path("./eval_res")

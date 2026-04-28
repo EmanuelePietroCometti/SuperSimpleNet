@@ -2,3 +2,5 @@ dataset/
 *.pyc
 /results_*
 /results
+/res_json
+/eval_res
