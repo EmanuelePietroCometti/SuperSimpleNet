@@ -1,0 +1,15 @@
+D:\emanuele\Code\SuperSimpleNet\results\custom_sup_0\visual\custom\custom_data\1\reject\Anomalous\20260309_165239_2_754_11369_nok_249871_ORIGINAL_002.bmp;
+D:\emanuele\Code\SuperSimpleNet\results\custom_sup_0\visual\custom\custom_data\1\reject\Anomalous\20260309_165303_3_1768_20834_nok_457905_ORIGINAL_004.bmp;
+D:\emanuele\Code\SuperSimpleNet\results\custom_sup_0\visual\custom\custom_data\1\reject\Anomalous\20260309_165408_2_686_31583_nok_694139_ORIGINAL_005.bmp;
+D:\emanuele\Code\SuperSimpleNet\results\custom_sup_0\visual\custom\custom_data\1\reject\Anomalous\20260330_095632_3_1455_102303_nok_8993726_ORIGINAL_001.bmp;
+D:\emanuele\Code\SuperSimpleNet\results\custom_sup_0\visual\custom\custom_data\1\reject\Anomalous\20260330_100012_3_1434_146751_nok_12901234_ORIGINAL_001.bmp;
+D:\emanuele\Code\SuperSimpleNet\results\custom_sup_0\visual\custom\custom_data\1\reject\Anomalous\20260330_100319_3_1647_184631_nok_16231361_ORIGINAL_001.bmp;
+D:\emanuele\Code\SuperSimpleNet\results\custom_sup_0\visual\custom\custom_data\1\reject\Anomalous\20260330_135613_3_1498_9086_nok_798834_ORIGINAL_001.bmp;
+D:\emanuele\Code\SuperSimpleNet\results\custom_sup_0\visual\custom\custom_data\1\reject\Anomalous\20260330_135650_3_1498_13334_nok_1172240_ORIGINAL_002.bmp;
+D:\emanuele\Code\SuperSimpleNet\results\custom_sup_0\visual\custom\custom_data\1\reject\Anomalous\20260330_135729_3_1690_17834_nok_1567843_ORIGINAL_002.bmp;
+D:\emanuele\Code\SuperSimpleNet\results\custom_sup_0\visual\custom\custom_data\1\reject\Anomalous\20260330_140227_3_1412_52212_nok_4590114_ORIGINAL_003.bmp;
+D:\emanuele\Code\SuperSimpleNet\results\custom_sup_0\visual\custom\custom_data\1\reject\Anomalous\20260330_141130_3_1434_114516_nok_10067393_ORIGINAL_004.bmp;
+D:\emanuele\Code\SuperSimpleNet\results\custom_sup_0\visual\custom\custom_data\1\reject\Anomalous\OriginalPatch_I_13_Q_283,235_S_192,948_classId_1_class_nok_score_1,935.bmp;
+D:\emanuele\Code\SuperSimpleNet\results\custom_sup_0\visual\custom\custom_data\1\reject\Anomalous\OriginalPatch_I_15_Q_325,905_S_27,587_classId_1_class_nok_score_1,217.bmp;
+D:\emanuele\Code\SuperSimpleNet\results\custom_sup_0\visual\custom\custom_data\1\reject\Anomalous\OriginalPatch_I_17_Q_1695,575_S_47,273_classId_1_class_nok_score_1,027.bmp;
+D:\emanuele\Code\SuperSimpleNet\results\custom_sup_0\visual\custom\custom_data\1\reject\Anomalous\OriginalPatch_I_22_Q_469,250_S_14,976_classId_1_class_nok_score_1,258.bmp;

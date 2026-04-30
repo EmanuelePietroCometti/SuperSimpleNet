@@ -21,7 +21,7 @@ from model.supersimplenet import SuperSimpleNet
 from datamodules.custom import CustomDataModule
 import argparse
 import os
-
+from utils.metrics_utils import evaluate_and_save_metrics
 
 @torch.no_grad()
 def eval(
@@ -165,6 +165,21 @@ def eval(
         score_save_path.mkdir(exist_ok=True, parents=True)
         with open(score_save_path / "scores.json", "w") as f:
             json.dump(score_dict, f)
+
+    y_true_np = results["label"].numpy()
+    y_probs_np = results["score"].numpy()
+    if score_save_path:
+        metrics_out_dir = score_save_path
+    else:
+        metrics_out_dir = Path("./eval_results") / "metrics_plots"
+        
+    print(f"Generating Confusion Matrix and AUROC at: {metrics_out_dir}")
+    evaluate_and_save_metrics(
+        y_true=y_true_np,
+        y_probs=y_probs_np,
+        output_dir=str(metrics_out_dir),
+        threshold="auto"
+    )
 
     return results_dict
 

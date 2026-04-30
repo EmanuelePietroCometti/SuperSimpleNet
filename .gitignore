@@ -5,3 +5,4 @@ dataset/
 /res_json
 /eval_res
 /onnx_model
+/eval_results
