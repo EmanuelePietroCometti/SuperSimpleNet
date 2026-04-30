@@ -19,6 +19,8 @@ from datamodules.ksdd2 import KSDD2
 from datamodules.sensum import Sensum
 from model.supersimplenet import SuperSimpleNet
 from datamodules.custom import CustomDataModule
+import argparse
+import os
 
 
 @torch.no_grad()
@@ -374,7 +376,7 @@ def generate_result_json(run_ids, datasets, ratios, res_path):
         json.dump(res_json, f)
 
 
-def run_eval(datasets, ratios, run_id, res_path):
+def run_eval(datasets, ratios, run_id, res_path, weight_path):
     """
     Evaluate the performance for given datasets for checkpoints with run_id.
 
@@ -427,17 +429,6 @@ def run_eval(datasets, ratios, run_id, res_path):
 
         for cat, datamodule in data_list:
             print("Evaluating", f"{dataset}-{cat}")
-            if dataset == "custom":
-                weight_path = Path(f"./results/custom_sup/checkpoints/custom/custom_data/{ratio}/weights.pt")
-            else:
-                weight_path = (
-                    config["weights_path"]
-                    / config["run_id"]
-                    / dataset
-                    / cat
-                    / config["ratio"]
-                    / "weights.pt"
-                )
             model = SuperSimpleNet(image_size=datamodule.image_size, config=config)
             model.load_model(weight_path)
 
@@ -497,16 +488,29 @@ def run_eval(datasets, ratios, run_id, res_path):
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Evaluate SuperSimpleNet")
+    parser.add_argument(
+        "weights_path", 
+        type=str, 
+        help="Explicit path to the weights.pt file to be evaluated"
+    )
+    args = parser.parse_args()
+
+    weights_path = args.weights_path
+
+    if not os.path.exists(weights_path):
+        raise FileNotFoundError(f"The specified weights file is missing: {weights_path}")
+
     datasets = ["custom"]
-    ratios = ["1"]  # set ratios according to the datasets
+    ratios = ["0"]  # set ratios according to the datasets
     # ratios = ["", "", "", ""]           # for ICPR (also set the adapt_cls_feat to True in config above!!!)
 
     res_path = Path("./eval_res")
-    run_eval(datasets=datasets, ratios=ratios, run_id=0, res_path=res_path)
+    run_eval(datasets=datasets, ratios=ratios, run_id=0, res_path=res_path, weight_path=weights_path)
     # to get mean and std of multiple runs, specify them with run_ids
     generate_result_json(
         run_ids=["0"],
         datasets=datasets,
         ratios=ratios,
-        res_path=res_path,
+        res_path=res_path
     )

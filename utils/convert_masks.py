@@ -12,7 +12,7 @@ def convert_masks(input_dir: str, output_dir: str):
     os.makedirs(output_dir, exist_ok=True)
 
     mask_paths = []
-    valid_extensions = [".bmp", ".BMP"]
+    valid_extensions = [".bmp", ".BMP", ".png", ".PNG"]
 
     for ext in valid_extensions:
         search_pattern = os.path.join(input_dir, f"*{ext}")
@@ -52,4 +52,4 @@ if __name__ == "__main__":
         help="Insert manually the output dir path"
     )
     args = parser.parse_args()
-    convert_masks(input_dir=parser.get("input_dir", "dataset/active_pool/masks"), output_dir=parser.get("output_dir", "dataset/active_pool/masks"))
+    convert_masks(input_dir=args.input_dir, output_dir=args.output_dir)
