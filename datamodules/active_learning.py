@@ -1,6 +1,5 @@
-# datamodules/active_learning.py
-import torch
 import albumentations as A
+from albumentations.pytorch import ToTensorV2
 from pathlib import Path
 from pandas import DataFrame
 from anomalib.data.utils import Split
@@ -96,6 +95,24 @@ class ActiveLearningDataModule(SSNDataModule):
             **kwargs
         )
         self.mode = mode
+
+        self.transform_eval = A.Compose([
+            A.Resize(height=image_size[0], width=image_size[1]),
+            A.Normalize(std=[0.485, 0.456, 0.406], mean=[0.229, 0.224, 0.225]),
+            ToTensorV2()
+        ])
+
+        self.transform_train = A.Compose([
+            A.Resize(height=image_size[0], width=image_size[1]),
+            A.CLAHE(clip_limit=4.0, tile_grid_size=(8,8), p=0.5),
+            A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1, hue=0.05, p=0.5),
+            A.MultiplicativeNoise(multiplier=(0.9, 1.1), elementwise=True, p=0.3),
+            A.SaltAndPepper(amount=(0.01, 0.03), p=0.2),
+            A.HorizontalFlip(p=0.7),
+            A.VerticalFlip(p=0.7),
+            A.Normalize(std=[0.485, 0.456, 0.406], mean=[0.229, 0.224, 0.225]),
+            ToTensorV2()
+        ])
 
         self.train_data = ActiveLearningDataset(
             root=self.root, transform=self.transform_train, split=Split.TRAIN, mode=self.mode, dt=dt, dilate=dilate
