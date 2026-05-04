@@ -6,3 +6,4 @@ dataset/
 /eval_res
 /onnx_model
 /eval_results
+.venv/

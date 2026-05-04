@@ -15,7 +15,13 @@ class ActiveLearningDataset(SSNDataset):
     - Unsupervised: Loads only normal images. Forces empty masks ("").
     - Supervised: Loads normal images + user-provided misclassified images with masks.
     """
-    def __init__(self, root: Path, transform: A.Compose, split: Split, mode: str, **kwargs):
+    def __init__(
+            self, root: Path, 
+            transform: A.Compose, 
+            split: Split,
+            mode: str,
+            **kwargs
+        ):
         self.mode = mode
         # Enable flips/augmentations ONLY for supervised fine-tuning to prevent overfitting
         flips = True if mode == "sup" else False
@@ -74,7 +80,15 @@ class ActiveLearningDataModule(SSNDataModule):
     """
     DataModule orchestrating the dataset loading based on the active learning mode.
     """
-    def __init__(self, root: Path | str, mode: str = "unsup", image_size: tuple[int, int] = (256, 256), **kwargs):
+    def __init__(
+            self,
+            root: Path | str, 
+            mode: str = "unsup", 
+            image_size: tuple[int, int] = (256, 256),
+            dilate: int | None = None,
+            dt: tuple[int, int] | None = None,  
+            **kwargs
+        ):
         super().__init__(
             root=root,
             supervision=Supervision.FULLY_SUPERVISED if mode == "sup" else Supervision.UNSUPERVISED,
@@ -82,10 +96,6 @@ class ActiveLearningDataModule(SSNDataModule):
             **kwargs
         )
         self.mode = mode
-        
-        # Distance transform and mask dilation are required ONLY for supervised training masks
-        dt = (3, 2) if mode == "sup" else None
-        dilate = 7 if mode == "sup" else None
 
         self.train_data = ActiveLearningDataset(
             root=self.root, transform=self.transform_train, split=Split.TRAIN, mode=self.mode, dt=dt, dilate=dilate

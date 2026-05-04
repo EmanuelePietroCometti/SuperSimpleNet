@@ -755,9 +755,11 @@ def train_custom_unsup(dataset_path: str, use_masks: bool = True) -> str:
         "wandb_project": "ssn",
         "setup_name": "custom_unsup",
         "dataset": "custom",
+        "dilate": 5,
+        "dt": (5,3),
         "category": "custom_data",
         "ratio": 0,
-        "backbone": "wide_resnet50_2",
+        "backbone": "resnet50",
         "layers": ["layer1", "layer2", "layer3"],
         "patch_size": 3,
         "noise": True,
@@ -766,23 +768,24 @@ def train_custom_unsup(dataset_path: str, use_masks: bool = True) -> str:
         "bad": True,
         "overlap": True,
         "adapt_cls_feat": False,
-        "noise_std": 0.015,
-        "perlin_thr": 0.2,
+        "noise_std": 0.025,
+        "perlin_thr": 0.3,
         "image_size": (256, 256),
         "seed": 42,
         "batch": 16,
         "epochs": 100,
-        "flips": False,
+        "flips": True,
         "seg_lr": 0.0002,
         "dec_lr": 0.0002,
         "adapt_lr": 0.0001,
         "gamma": 0.4,
         "stop_grad": True,
         "clip_grad": False,
-        "eval_step_size": 20,
+        "eval_step_size": 10,
         "num_workers": 4,
         "results_save_path": Path("./results"),
-        "name": "custom_unsup_phase"
+        "name": "custom_unsup_phase",
+
     }
     
     model = SuperSimpleNet(image_size=config["image_size"], config=config)
@@ -790,6 +793,8 @@ def train_custom_unsup(dataset_path: str, use_masks: bool = True) -> str:
         root=root_path, 
         mode="unsup", 
         image_size=config["image_size"], 
+        dilate=config["dilate"],
+        dt=config["dt"],
         train_batch_size=config["batch"], 
         eval_batch_size=config["batch"], 
         num_workers=config["num_workers"]
@@ -816,8 +821,10 @@ def train_custom_sup(dataset_path: str, weights_path: str = None, use_masks: boo
         "wandb_project": "ssn",
         "setup_name": "custom_sup",
         "dataset": "custom",
+        "dilate": 5,
+        "dt": (5,3),
         "category": "custom_data",
-        "backbone": "wide_resnet50_2",
+        "backbone": "resnet50",
         "layers": ["layer1", "layer2", "layer3"],
         "patch_size": 3,
         "noise": True,
@@ -826,7 +833,7 @@ def train_custom_sup(dataset_path: str, weights_path: str = None, use_masks: boo
         "bad": True,
         "overlap": False,
         "adapt_cls_feat": False,
-        "noise_std": 0.015,
+        "noise_std": 0.025,
         "image_size": (256, 256),
         "seed": 42,
         "batch": 4,
@@ -836,7 +843,7 @@ def train_custom_sup(dataset_path: str, weights_path: str = None, use_masks: boo
         "adapt_lr": 0.0001,
         "gamma": 0.4,
         "results_save_path": Path("./results"),
-        "epochs": 30,            # Adjust this as needed for fine-tuning
+        "epochs": 50,            # Adjust this as needed for fine-tuning
         "num_workers": 1,       # MUST be 1 for SSN supervised frequency tracking
         "stop_grad": False,     # Train discriminator completely
         "clip_grad": True,      # Avoid gradient explosion
@@ -859,6 +866,8 @@ def train_custom_sup(dataset_path: str, weights_path: str = None, use_masks: boo
         root=root_path, 
         mode="sup", 
         image_size=config["image_size"], 
+        dt=config["dt"],
+        dilate=config["dilate"],
         train_batch_size=config["batch"], 
         eval_batch_size=config["batch"], 
         num_workers=config["num_workers"]

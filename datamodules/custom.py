@@ -80,8 +80,8 @@ class CustomSupervisedDataset(SSNDataset):
         anomalous_samples = []
         
         # Load user-provided misclassified anomalies
-        misc_img_dir = self.root / "misclassified" / "images"
-        misc_mask_dir = self.root / "misclassified" / "masks"
+        misc_img_dir = self.root / "active_pool" / "images"
+        misc_mask_dir = self.root / "active_pool" / "masks"
         
         if misc_img_dir.exists() and misc_mask_dir.exists():
             for img_path in misc_img_dir.glob("*.*"):
