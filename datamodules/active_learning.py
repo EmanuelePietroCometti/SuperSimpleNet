@@ -104,10 +104,21 @@ class ActiveLearningDataModule(SSNDataModule):
 
         self.transform_train = A.Compose([
             A.Resize(height=image_size[0], width=image_size[1]),
-            A.CLAHE(clip_limit=4.0, tile_grid_size=(8,8), p=0.5),
-            A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1, hue=0.05, p=0.5),
-            A.MultiplicativeNoise(multiplier=(0.9, 1.1), elementwise=True, p=0.3),
-            A.SaltAndPepper(amount=(0.01, 0.03), p=0.2),
+            A.ColorJitter(
+                brightness_range=[0.8, 1.2],
+                contrast_range=[0.8, 1.2],
+                saturation_range=[0.8, 1.2],
+                hue_range=[-0.5, 0.5],
+                p=1.0
+            ),
+            #A.AutoContrast(cutoff=0, method='cdf', p=1),
+            A.CLAHE(
+                clip_range=[1, 4],
+                tile_grid_size=[8, 8],
+                p=1.0
+            ),
+            #A.MultiplicativeNoise(multiplier=(0.9, 1.1), elementwise=True, p=0.3),
+            #A.SaltAndPepper(amount=(0.01, 0.03), p=1),
             A.HorizontalFlip(p=0.7),
             A.VerticalFlip(p=0.7),
             A.Normalize(std=[0.485, 0.456, 0.406], mean=[0.229, 0.224, 0.225]),
