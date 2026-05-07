@@ -759,7 +759,7 @@ def train_custom_unsup(dataset_path: str, use_masks: bool = True) -> str:
         "dt": (5,3),
         "category": "custom_data",
         "ratio": 0,
-        "backbone": "resnet50",
+        "backbone": "wide_resnet50_2",
         "layers": ["layer1", "layer2", "layer3"],
         "patch_size": 3,
         "noise": True,
@@ -768,12 +768,12 @@ def train_custom_unsup(dataset_path: str, use_masks: bool = True) -> str:
         "bad": True,
         "overlap": True,
         "adapt_cls_feat": False,
-        "noise_std": 0.025,
+        "noise_std": 0.05,
         "perlin_thr": 0.3,
         "image_size": (256, 256),
         "seed": 42,
         "batch": 4,
-        "epochs": 300,
+        "epochs": 80,
         "flips": True,
         "seg_lr": 0.0002,
         "dec_lr": 0.0002,
@@ -824,7 +824,7 @@ def train_custom_sup(dataset_path: str, weights_path: str = None, use_masks: boo
         "dilate": 5,
         "dt": (5,3),
         "category": "custom_data",
-        "backbone": "resnet50",
+        "backbone": "wide_resnet50_2",
         "layers": ["layer1", "layer2", "layer3"],
         "patch_size": 3,
         "noise": True,
@@ -833,7 +833,7 @@ def train_custom_sup(dataset_path: str, weights_path: str = None, use_masks: boo
         "bad": True,
         "overlap": False,
         "adapt_cls_feat": False,
-        "noise_std": 0.025,
+        "noise_std": 0.05,
         "image_size": (256, 256),
         "seed": 42,
         "batch": 2,
@@ -843,7 +843,7 @@ def train_custom_sup(dataset_path: str, weights_path: str = None, use_masks: boo
         "adapt_lr": 0.0001,
         "gamma": 0.4,
         "results_save_path": Path("./results"),
-        "epochs": 50,            # Adjust this as needed for fine-tuning
+        "epochs": 30,            # Adjust this as needed for fine-tuning
         "num_workers": 1,       # MUST be 1 for SSN supervised frequency tracking
         "stop_grad": False,     # Train discriminator completely
         "clip_grad": True,      # Avoid gradient explosion

@@ -19,6 +19,7 @@ from datamodules.ksdd2 import KSDD2
 from datamodules.sensum import Sensum
 from model.supersimplenet import SuperSimpleNet
 from datamodules.custom import CustomDataModule
+from datamodules.active_learning import ActiveLearningDataModule
 import argparse
 import os
 from utils.metrics_utils import evaluate_and_save_metrics
@@ -37,13 +38,12 @@ def eval(
     model.to(device)
     model.eval()
 
-    # for anomaly map max as image score
+    # For anomaly map max as image score
     seg_image_metrics = {}
 
     for m_name, metric in image_metrics.items():
         metric.cpu()
         metric.reset()
-
         seg_image_metrics[f"seg-{m_name}"] = copy.deepcopy(metric)
 
     for metric in pixel_metrics.values():
@@ -60,6 +60,7 @@ def eval(
         "image_path": [],
         "mask_path": [],
     }
+    
     for batch in tqdm(test_loader, position=0, leave=True):
         image_batch = batch["image"].to(device)
         anomaly_map, anomaly_score = model.forward(image_batch)
@@ -85,7 +86,7 @@ def eval(
     results["gt_mask"] = torch.cat(results["gt_mask"])
     results["label"] = torch.cat(results["label"])
 
-    # normalize
+    # Normalize
     if normalize:
         results["anomaly_map"] = (
             results["anomaly_map"] - results["anomaly_map"].flatten().min()
@@ -113,7 +114,7 @@ def eval(
 
     for name, metric in pixel_metrics.items():
         try:
-            # avoid nan in early stages
+            # Avoid nan in early stages
             am = results["anomaly_map"]
             am[am != am] = 0
             results["anomaly_map"] = am
@@ -123,7 +124,7 @@ def eval(
             )
             results_dict[name] = metric.to(device).compute().item()
         except RuntimeError:
-            # AUPRO in some cases with early predictions crashes cuda, so just skip it in that case
+            # AUPRO in some cases with early predictions crashes cuda, skip it in that case
             results_dict[name] = 0
         metric.to("cpu")
 
@@ -138,7 +139,7 @@ def eval(
 
     score_dict = {}
     if score_save_path:
-        # save both segscore and score to json
+        # Save both segscore and score to json
         for img_path, score, seg_score, label in zip(
             results["image_path"],
             results["score"],
@@ -151,7 +152,7 @@ def eval(
             if anomaly_type not in score_dict:
                 score_dict[anomaly_type] = {"good": {}, "bad": {}}
 
-            # since some datasets (sensum) can have same names in bad and good
+            # Some datasets (sensum) can have the same names in bad and good
             if label == 1:
                 kind = "bad"
             else:
@@ -168,6 +169,7 @@ def eval(
 
     y_true_np = results["label"].numpy()
     y_probs_np = results["score"].numpy()
+    
     if score_save_path:
         metrics_out_dir = score_save_path
     else:
@@ -178,7 +180,8 @@ def eval(
         y_true=y_true_np,
         y_probs=y_probs_np,
         output_dir=str(metrics_out_dir),
-        threshold="auto"
+        threshold="auto",
+        image_paths=results["image_path"]
     )
 
     return results_dict
@@ -296,13 +299,22 @@ def get_visa(config):
 
 
 def get_custom(config):
-    datamodule = CustomDataModule(
-        root=Path(config["datasets_folder"]),
-        mode="unsup",
-        image_size=config["image_size"] if "image_size" in config else (256, 256),
-        eval_batch_size=config["batch"],
-        num_workers=config["num_workers"]
-    )
+    if config.get("active_learning_datamodule", False):
+        datamodule = ActiveLearningDataModule(
+            root=Path(config["datasets_folder"]),
+            mode="unsup",
+            image_size=config["image_size"] if "image_size" in config else (256, 256),
+            eval_batch_size=config["batch"],
+            num_workers=config["num_workers"]
+        )
+    else:
+        datamodule = CustomDataModule(
+            root=Path(config["datasets_folder"]),
+            mode="unsup",
+            image_size=config["image_size"] if "image_size" in config else (256, 256),
+            eval_batch_size=config["batch"],
+            num_workers=config["num_workers"]
+        )
     datamodule.setup()
     
     # Restituisce una tupla con la categoria ("custom") e il modulo
@@ -359,38 +371,6 @@ def get_stats(dataset, run_ids, ratio, base_path):
 
     return comb_avg, comb_std
 
-
-def generate_result_json(run_ids, datasets, ratios, res_path):
-    """
-    Generate json with mean and std for all passed datasets and run_ids.
-
-    Args:
-        run_ids: list of run_ids
-        datasets: list of datasets
-        ratios: list of ratios for each datasets
-        res_path: root path of results (csvs)
-
-    """
-    res_json = {"avg": {}, "std": {}}
-
-    for dataset, ratio in zip(datasets, ratios):
-        if ratio not in res_json["avg"]:
-            res_json["avg"][ratio] = {}
-            res_json["std"][ratio] = {}
-
-        avg, std = get_stats(dataset, run_ids, ratio, res_path)
-        avg = avg.drop(columns=["run_id"])
-        std = std.drop(columns=["run_id"])
-
-        res_json["avg"][ratio][dataset] = avg.to_dict()
-        if len(run_ids) > 1:
-            res_json["std"][ratio][dataset] = std.to_dict()
-
-    Path("./res_json").mkdir(exist_ok=True, parents=True)
-    with open("./res_json/ssn.json", "w") as f:
-        json.dump(res_json, f)
-
-
 def run_eval(datasets, ratios, run_id, res_path, weight_path):
     """
     Evaluate the performance for given datasets for checkpoints with run_id.
@@ -415,6 +395,7 @@ def run_eval(datasets, ratios, run_id, res_path, weight_path):
         "layers": ["layer1", "layer2", "layer3"],
         "patch_size": 3,
         "image_size": (256, 256),
+        "active_learning_datamodule": True
     }
     data_functions = {
         "sensum": get_sensum,
@@ -457,8 +438,8 @@ def run_eval(datasets, ratios, run_id, res_path, weight_path):
             else:
                 pixel_metrics = {
                     "P-AUROC": AUROC(),
-                    "AP-loc": AveragePrecision(num_classes=1),
-                    "AUPRO": AUPRO(),  
+                    #"AP-loc": AveragePrecision(num_classes=1),
+                    #"AUPRO": AUPRO(),  
                 }
 
             results = eval(
@@ -522,10 +503,3 @@ if __name__ == "__main__":
 
     res_path = Path("./eval_res")
     run_eval(datasets=datasets, ratios=ratios, run_id=0, res_path=res_path, weight_path=weights_path)
-    # to get mean and std of multiple runs, specify them with run_ids
-    generate_result_json(
-        run_ids=["0"],
-        datasets=datasets,
-        ratios=ratios,
-        res_path=res_path
-    )

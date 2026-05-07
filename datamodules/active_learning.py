@@ -109,13 +109,13 @@ class ActiveLearningDataModule(SSNDataModule):
                 contrast_range=[0.8, 1.2],
                 saturation_range=[0.8, 1.2],
                 hue_range=[-0.5, 0.5],
-                p=1.0
+                p=0.2
             ),
             #A.AutoContrast(cutoff=0, method='cdf', p=1),
             A.CLAHE(
                 clip_range=[1, 4],
                 tile_grid_size=[8, 8],
-                p=1.0
+                p=0.3
             ),
             #A.MultiplicativeNoise(multiplier=(0.9, 1.1), elementwise=True, p=0.3),
             #A.SaltAndPepper(amount=(0.01, 0.03), p=1),
