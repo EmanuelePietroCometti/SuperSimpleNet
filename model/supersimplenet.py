@@ -12,7 +12,9 @@ from torchvision.transforms import GaussianBlur
 
 from common.perlin_noise import rand_perlin_2d
 from .feature_extractor import FeatureExtractor
-
+import cv2
+import numpy as np
+from model.early_stopping import EarlyStopping
 
 class SuperSimpleNet(nn.Module):
     """
@@ -113,21 +115,24 @@ class SuperSimpleNet(nn.Module):
 
     def get_optimizers(self) -> tuple[Optimizer, LRScheduler]:
         seg_params, dec_params = self.discriminator.get_params()
+
+        wd = self.config.get("weight_decay", 1e-5)
         optim = AdamW(
             [
                 {
                     "params": self.feature_adaptor.parameters(),
                     "lr": self.config["adapt_lr"],
+                    "weight_decay": wd,
                 },
                 {
                     "params": seg_params,
                     "lr": self.config["seg_lr"],
-                    "weight_decay": 0.00001,
+                    "weight_decay": wd,
                 },
                 {
                     "params": dec_params,
                     "lr": self.config["dec_lr"],
-                    "weight_decay": 0.00001,
+                    "weight_decay": wd,
                 },
             ]
         )
@@ -203,21 +208,27 @@ class Discriminator(nn.Module):
         self.fh = feature_h
         self.stop_grad = config.get("stop_grad", False)
 
+        spatial_dropout_p = config.get("spatial_dropout", 0.0)
+        fc_dropout_p = config.get("fc_dropout", 0.0)
+
         # 1x1 conv - linear layer equivalent
         self.seg = nn.Sequential(
             nn.Conv2d(
                 in_channels=projection_dim,
                 out_channels=hidden_dim,
-                kernel_size=1,
+                kernel_size=3,
                 stride=1,
+                padding=1
             ),
             nn.BatchNorm2d(hidden_dim),
             nn.LeakyReLU(0.2, inplace=True),
+            nn.Dropout2d(p=spatial_dropout_p),
             nn.Conv2d(
                 in_channels=hidden_dim,
                 out_channels=1,
-                kernel_size=1,
+                kernel_size=3,
                 stride=1,
+                padding=1,
                 bias=False,
             ),
         )
@@ -232,6 +243,7 @@ class Discriminator(nn.Module):
         self.dec_avg_pool = nn.AdaptiveAvgPool2d(output_size=(1, 1))
         self.dec_max_pool = nn.AdaptiveMaxPool2d(output_size=(1, 1))
 
+        self.dropout_fc = nn.Dropout(p=fc_dropout_p)
         self.fc_score = nn.Linear(in_features=128 * 2 + 2, out_features=1)
 
         self.apply(init_weights)
@@ -269,6 +281,7 @@ class Discriminator(nn.Module):
         dec_cat = torch.cat((dec_max, dec_avg, map_max, map_avg), dim=1).squeeze(
             dim=(2, 3)
         )
+        dec_cat = self.dropout_fc(dec_cat)
         score = self.fc_score(dec_cat).squeeze(dim=1)
 
         return map, score
@@ -361,6 +374,32 @@ class AnomalyGenerator(nn.Module):
 
             perlin.append(perlin_thr)
         return torch.cat(perlin)
+    
+    def generate_line_mask(self, batches) -> Tensor:
+        """Generates masks with random lines to simulate 'straw' artifacts"""
+        masks = []
+        for _ in range(batches):
+            # Create a blank black canvas (height x width)
+            mask = np.zeros((self.height, self.width), dtype=np.float32)
+            
+            # Define random start (x1, y1) and end (x2, y2) points for the line
+            x1, y1 = np.random.randint(0, self.width), np.random.randint(0, self.height)
+            x2, y2 = np.random.randint(0, self.width), np.random.randint(0, self.height)
+            
+            # Set random line thickness (1 to 2 pixels) to mimic thin threads
+            thickness = np.random.randint(1, 3) 
+            
+            # Draw a white line (value 1.0) on the mask
+            cv2.line(mask, (x1, y1), (x2, y2), 1.0, thickness)
+            
+            # Apply Gaussian Blur to soften edges and avoid sharp artificial transitions
+            mask = cv2.GaussianBlur(mask, (3, 3), 0)
+            
+            # Convert to PyTorch Tensor and add Batch/Channel dimensions (1, 1, H, W)
+            masks.append(torch.from_numpy(mask).unsqueeze(0).unsqueeze(0))
+            
+        # Concatenate all generated masks along the batch dimension
+        return torch.cat(masks)
 
     def forward(
         self, features: Tensor | None, adapted: Tensor, mask: Tensor, labels: Tensor
@@ -400,13 +439,26 @@ class AnomalyGenerator(nn.Module):
             noise_mask = noise_mask * (1 - mask)
 
         if self.config["perlin"]:
+            # 50% probability to generate either Nodes (Perlin) or Straws (Lines)
+            if torch.rand(1).item() > 0.5:
+                # Use Perlin noise for "Nodes" 
+                # (Using a high perlin range to create medium-sized blobs, e.g., 2-5)
+                anomaly_mask = self.generate_perlin(b * 2).to(adapted.device)
+            else:
+                # Use random lines for "Straws"
+                anomaly_mask = self.generate_line_mask(b * 2).to(adapted.device)
+            
+            # Combine the noise mask with the generated anomaly mask
+            noise_mask = noise_mask * anomaly_mask
+        
+        """if self.config["perlin"]:
             # [B * 2, 1, H, W]
             perlin_mask = self.generate_perlin(b * 2).to(adapted.device)
             # if perlin only apply where perlin mask is 1
             noise_mask = noise_mask * perlin_mask
         else:
             # if not perlin, original SN strategy: don't apply to first half of samples
-            noise_mask[:b, ...] = 0
+            noise_mask[:b, ...] = 0"""
 
         # update gt mask
         mask = mask + noise_mask
@@ -419,10 +471,25 @@ class AnomalyGenerator(nn.Module):
         # binarize
         labels = torch.where(labels > 0, 1, 0)
 
-        # apply masked noise
-        perturbed_adapt = adapted + noise * noise_mask
+        """# apply masked noise
+        perturbed_adapt = adapted + noise * noise_mask"""
+        # Multiply local features to simulate dense accumulation or shadows (nodes)
+        intensity_shift = torch.rand(1).item() * 0.5 + 0.5  # shift between 0.5 and 1.0
+        
+        # Modify the perturbed_adapt row in AnomalyGenerator
+        # 1. Lower or raise the original feature intensity (simulates shadow/thickness)
+        # 2. Add slight noise to represent surface irregularity
+        perturbed_adapt = torch.where(
+            noise_mask > 0,
+            adapted * intensity_shift + (noise * 0.5), # Preserves base color information
+            adapted
+        )
         if features is not None:
-            perturbed_feat = features + noise * noise_mask
+            perturbed_feat = torch.where(
+                noise_mask > 0,
+                features * intensity_shift + (noise * 0.5),
+                features
+            )
         else:
             perturbed_feat = None
 

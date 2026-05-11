@@ -8,6 +8,8 @@ from datamodules.base import Supervision
 from datamodules.base.datamodule import SSNDataModule
 from datamodules.base.dataset import SSNDataset
 
+import cv2
+
 class ActiveLearningDataset(SSNDataset):
     """
     Dataset class supporting both unsupervised and supervised active learning modes.
@@ -121,6 +123,13 @@ class ActiveLearningDataModule(SSNDataModule):
             #A.SaltAndPepper(amount=(0.01, 0.03), p=1),
             A.HorizontalFlip(p=0.7),
             A.VerticalFlip(p=0.7),
+            A.Rotate(
+                limit=180,                        # Random angle between -180 and 180 degrees
+                interpolation=cv2.INTER_LINEAR,   # Interpolation method
+                border_mode=cv2.BORDER_REFLECT,   # How to deal with empty space after rotation
+                value=0,                          # Padding value if border_mode is BORDER_CONSTANT
+                p=0.8                             # Probability of applying the transform (80%)
+            ),
             A.Normalize(std=[0.485, 0.456, 0.406], mean=[0.229, 0.224, 0.225]),
             ToTensorV2()
         ])

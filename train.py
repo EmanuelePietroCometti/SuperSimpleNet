@@ -35,6 +35,8 @@ from common.results_writer import ResultsWriter
 from common.loss import focal_loss
 from datamodules.active_learning import ActiveLearningDataModule
 from active_sampler import extract_active_samples
+from model.early_stopping import EarlyStopping
+from torch.cuda.amp import autocast, GradScaler
 
 
 def train(
@@ -47,9 +49,15 @@ def train(
     th: float = 0.5,
     clip_grad: bool = True,
     eval_step_size: int = 4,
+    save_path: Path = None,
+    patience: int = 10,
+    monitor_metric: str = "I-AUROC"
 ):
     model.to(device)
     optimizer, scheduler = model.get_optimizers()
+
+    early_stopper = EarlyStopping(patience=patience, mode="max", save_path=save_path)
+    scaler = GradScaler(enabled=(device == "cuda"))
 
     model.train()
     train_loader = datamodule.train_dataloader()
@@ -83,71 +91,82 @@ def train(
                 label = batch["label"].to(device).type(torch.float32)
                 is_segmented = batch["is_segmented"].to(device).type(torch.float32)
 
-                anomaly_map, score, mask, label = model.forward(
-                    image_batch, mask, label
-                )
-
-                seg_focal = focal_loss(torch.sigmoid(anomaly_map), mask, reduction=None)
-
-                # use this shape to apply weights from distance transform if enabled
-                seg_l1 = torch.zeros_like(anomaly_map)
-
-                # adjusted truncated l1: mask + flipped sign (ano->pos, good->neg)
-                normal_scores = anomaly_map[mask == 0]
-                seg_l1[mask == 0] = torch.clip(normal_scores + th, min=0)
-
-                anomalous_scores = anomaly_map[mask > 0]
-                seg_l1[mask > 0] = torch.clip(-anomalous_scores + th, min=0)
-
-                if "loss_mask" in batch:
-                    loss_mask = batch["loss_mask"].type(torch.float32).to(device)
-
-                    # resize loss_mask to fit the loss
-                    loss_mask = F.interpolate(
-                        loss_mask.unsqueeze(1),
-                        size=seg_focal.shape[-2:],
-                        mode="bilinear",
-                        align_corners=True,
+                # Wrap the forward pass and loss computation inside the autocast context.
+                # This automatically casts compatible operations to float16 to save memory.
+                with autocast(enabled = (device == 'cuda')):
+                    anomaly_map, score, mask, label = model.forward(
+                        image_batch, mask, label
                     )
 
-                    # due to feat. duplication stack mask and multiply to get weighted loss
-                    loss_mask = torch.cat((loss_mask, loss_mask))
-                    seg_focal *= loss_mask
-                    seg_l1 *= loss_mask
+                    # seg_focal = focal_loss(torch.sigmoid(anomaly_map), mask, reduction=None)
+                    seg_focal = focal_loss(anomaly_map, mask, reduction=None)
 
-                # due to feat. duplication
-                is_segmented = torch.cat((is_segmented, is_segmented)).type(torch.bool)
+                    # use this shape to apply weights from distance transform if enabled
+                    seg_l1 = torch.zeros_like(anomaly_map)
 
-                bad_loss = seg_l1[is_segmented][mask[is_segmented] > 0]
-                good_loss = seg_l1[is_segmented][mask[is_segmented] == 0]
-                focal_val = seg_focal[is_segmented]
+                    # adjusted truncated l1: mask + flipped sign (ano->pos, good->neg)
+                    normal_scores = anomaly_map[mask == 0]
+                    seg_l1[mask == 0] = torch.clip(normal_scores + th, min=0)
 
-                if len(good_loss):
-                    good_loss = good_loss.mean()
-                else:
-                    good_loss = 0
-                if len(bad_loss):
-                    bad_loss = bad_loss.mean()
-                else:
-                    bad_loss = 0
-                if len(focal_val):
-                    focal_val = focal_val.mean()
-                else:
-                    focal_val = 0
+                    anomalous_scores = anomaly_map[mask > 0]
+                    seg_l1[mask > 0] = torch.clip(-anomalous_scores + th, min=0)
 
-                # seg loss is combination of trunc l1 and focal (separately avg each l1 part due to unbalanced pixels)
-                seg_loss = good_loss + bad_loss + focal_val
+                    if "loss_mask" in batch:
+                        loss_mask = batch["loss_mask"].type(torch.float32).to(device)
 
-                loss = seg_loss + focal_loss(torch.sigmoid(score), label)
+                        # resize loss_mask to fit the loss
+                        loss_mask = F.interpolate(
+                            loss_mask.unsqueeze(1),
+                            size=seg_focal.shape[-2:],
+                            mode="bilinear",
+                            align_corners=True,
+                        )
 
-                loss.backward()
+                        # due to feat. duplication stack mask and multiply to get weighted loss
+                        loss_mask = torch.cat((loss_mask, loss_mask))
+                        seg_focal *= loss_mask
+                        seg_l1 *= loss_mask
+
+                    # due to feat. duplication
+                    is_segmented = torch.cat((is_segmented, is_segmented)).type(torch.bool)
+
+                    bad_loss = seg_l1[is_segmented][mask[is_segmented] > 0]
+                    good_loss = seg_l1[is_segmented][mask[is_segmented] == 0]
+                    focal_val = seg_focal[is_segmented]
+
+                    if len(good_loss):
+                        good_loss = good_loss.mean()
+                    else:
+                        good_loss = 0
+                    if len(bad_loss):
+                        bad_loss = bad_loss.mean()
+                    else:
+                        bad_loss = 0
+                    if len(focal_val):
+                        focal_val = focal_val.mean()
+                    else:
+                        focal_val = 0
+
+                    # seg loss is combination of trunc l1 and focal (separately avg each l1 part due to unbalanced pixels)
+                    seg_loss = good_loss + bad_loss + focal_val
+
+                    #loss = seg_loss + focal_loss(torch.sigmoid(score), label)
+                    loss = (seg_loss + focal_loss(score, label)).mean()
+
+                # Scale the loss and call backward on the scaled loss
+                # This prevents underflow of small gradients in float16
+                scaler.scale(loss).backward()
 
                 if clip_grad:
-                    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1)
+                    # Unscale the gradients BEFORE applying gradient clipping.
+                    scaler.unscale_(optimizer)
+                    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 else:
                     norm = None
 
-                optimizer.step()
+                # Step the optimizer using the scaler and update the scaler factor for the next iteration
+                scaler.step(optimizer)
+                scaler.update()
 
                 total_loss += loss.detach().cpu().item()
 
@@ -171,10 +190,20 @@ def train(
                 )
                 if LOG_WANDB:
                     wandb.log({**results, **output})
+
+                if monitor_metric in results:
+                    early_stopper(results[monitor_metric], model)
+                    if early_stopper.early_stop:
+                        print(f"Early stopping triggered at epoch {epoch}")
+                        break
             else:
                 if LOG_WANDB:
                     wandb.log(output)
         scheduler.step()
+
+    if save_path is not None and (save_path / "weights.pt").exists():
+        print("Loading best model weights for final evaluation...")
+        model.load_model(save_path / "weights.pt")
 
     return results
 
@@ -344,6 +373,15 @@ def train_and_eval(model, datamodule, config, device, use_masks: bool = True):
     else:
         pixel_metrics = {}
 
+    checkpoint_dir = (
+        Path(config["results_save_path"])
+        / config["setup_name"]
+        / "checkpoints"
+        / config["dataset"]
+        / config["category"]
+        / str(config["ratio"])
+    )
+
     train(
         model=model,
         epochs=config["epochs"],
@@ -353,21 +391,12 @@ def train_and_eval(model, datamodule, config, device, use_masks: bool = True):
         pixel_metrics=pixel_metrics,
         clip_grad=config["clip_grad"],
         eval_step_size=config["eval_step_size"],
+        save_path=checkpoint_dir,
+        patience=config.get("patience", 10),
+        monitor_metric="I-AUROC"
     )
     if LOG_WANDB:
         wandb.finish()
-
-    try:
-        model.save_model(
-            Path(config["results_save_path"])
-            / config["setup_name"]
-            / "checkpoints"
-            / config["dataset"]
-            / config["category"]
-            / str(config["ratio"]),
-        )
-    except Exception as e:
-        print("Error saving checkpoint" + str(e))
 
     results = test(
         model=model,
@@ -767,13 +796,13 @@ def train_custom_unsup(dataset_path: str, use_masks: bool = True) -> str:
         "no_anomaly": "empty",
         "bad": True,
         "overlap": True,
-        "adapt_cls_feat": False,
-        "noise_std": 0.05,
-        "perlin_thr": 0.3,
+        "adapt_cls_feat": True,
+        "noise_std": 0.015,
+        "perlin_thr": 0.2,
         "image_size": (256, 256),
         "seed": 42,
-        "batch": 4,
-        "epochs": 80,
+        "batch": 8,
+        "epochs": 300,
         "flips": True,
         "seg_lr": 0.0002,
         "dec_lr": 0.0002,
@@ -781,11 +810,14 @@ def train_custom_unsup(dataset_path: str, use_masks: bool = True) -> str:
         "gamma": 0.4,
         "stop_grad": True,
         "clip_grad": False,
-        "eval_step_size": 10,
+        "eval_step_size": 5,
         "num_workers": 4,
         "results_save_path": Path("./results"),
         "name": "custom_unsup_phase",
-
+        "spatial_dropout": 0.2,
+        "fc_dropout": 0.4,
+        "weight_decay": 0.0001,
+        "patience": 10
     }
     
     model = SuperSimpleNet(image_size=config["image_size"], config=config)
@@ -836,7 +868,7 @@ def train_custom_sup(dataset_path: str, weights_path: str = None, use_masks: boo
         "noise_std": 0.05,
         "image_size": (256, 256),
         "seed": 42,
-        "batch": 2,
+        "batch": 8,
         "seg_lr": 0.0002,
         "eval_step_size": 8,
         "dec_lr": 0.0002,
@@ -845,12 +877,16 @@ def train_custom_sup(dataset_path: str, weights_path: str = None, use_masks: boo
         "results_save_path": Path("./results"),
         "epochs": 30,            # Adjust this as needed for fine-tuning
         "num_workers": 1,       # MUST be 1 for SSN supervised frequency tracking
-        "stop_grad": False,     # Train discriminator completely
+        "stop_grad": True,     # Train discriminator completely
         "clip_grad": True,      # Avoid gradient explosion
         "flips": True,          # Add augmentation
         "perlin_thr": 0.6,
         "ratio": 1,             # Flag for supervised
-        "name": "custom_sup_phase"
+        "name": "custom_sup_phase",
+        "spatial_dropout": 0.2,
+        "fc_dropout": 0.4,
+        "weight_decay": 0.0001,
+        "patience": 10
     }
     
     model = SuperSimpleNet(image_size=config["image_size"], config=config)
@@ -896,7 +932,7 @@ def run_active_learning_master(dataset_path: str, use_masks: bool = True):
             model_weights_path=saved_weights_path,
             unlabeled_pool_dir=str(pool_dir),
             output_misclassified_dir=str(active_pool_dir),
-            budget=20,
+            budget=120,
             threshold=0.5
         )
         
