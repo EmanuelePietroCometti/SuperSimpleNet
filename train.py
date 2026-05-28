@@ -34,6 +34,7 @@ from model.supersimplenet import SuperSimpleNet
 from common.visualizer import Visualizer
 from common.results_writer import ResultsWriter
 from common.loss import focal_loss
+from torchvision.transforms import v2
 
 
 def train(
@@ -41,6 +42,7 @@ def train(
     epochs: int,
     datamodule: LightningDataModule,
     device: str,
+    config: dict,
     image_metrics: dict[str, Metric],
     pixel_metrics: dict[str, Metric],
     th: float = 0.5,
@@ -49,6 +51,11 @@ def train(
 ):
     model.to(device)
     optimizer, scheduler = model.get_optimizers()
+
+    gpu_transforms = v2.Compose([
+        v2.Resize(size=config["image_size"], antialias=True),
+        v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ]).to(device)
 
     model.train()
     train_loader = datamodule.train_dataloader()
@@ -64,12 +71,17 @@ def train(
             for i, batch in enumerate(train_loader):
                 optimizer.zero_grad()
 
-                image_batch = batch["image"].to(device)
+                image_batch = batch["image"].to(device, non_blocking=True)
 
                 # best downsampling proposed by DestSeg
-                mask = batch["mask"].type(torch.float32).to(device)
+                mask = batch["mask"].to(device, dtype=torch.float32, non_blocking=True)
+
+                image_batch = gpu_transforms(image_batch)
+                mask = v2.functional.resize(mask, size=config["image_size"], antialias=False)
+
+
                 mask = F.interpolate(
-                    mask.unsqueeze(1),
+                    mask,
                     size=(model.fh, model.fw),
                     mode="bilinear",
                     align_corners=True,
@@ -78,8 +90,8 @@ def train(
                     mask < 0.5, torch.zeros_like(mask), torch.ones_like(mask)
                 )
 
-                label = batch["label"].to(device).type(torch.float32)
-                is_segmented = batch["is_segmented"].to(device).type(torch.float32)
+                label = batch["label"].to(device, dtype=torch.float32, non_blocking=True)
+                is_segmented = batch["is_segmented"].to(device, dtype=torch.float32, non_blocking=True)
 
                 anomaly_map, score, mask, label = model.forward(
                     image_batch, mask, label
@@ -98,11 +110,11 @@ def train(
                 seg_l1[mask > 0] = torch.clip(-anomalous_scores + th, min=0)
 
                 if "loss_mask" in batch:
-                    loss_mask = batch["loss_mask"].type(torch.float32).to(device)
+                    loss_mask = batch["loss_mask"].to(device, dtype=torch.float32, non_blocking=True)
 
                     # resize loss_mask to fit the loss
                     loss_mask = F.interpolate(
-                        loss_mask.unsqueeze(1),
+                        loss_mask,
                         size=seg_focal.shape[-2:],
                         mode="bilinear",
                         align_corners=True,
@@ -141,17 +153,18 @@ def train(
                 loss.backward()
 
                 if clip_grad:
-                    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1)
+                    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1).item()
                 else:
-                    norm = None
+                    norm = 0.0
 
                 optimizer.step()
-
-                total_loss += loss.detach().cpu().item()
+                
+                loss_val = loss.detach().item()
+                total_loss += loss_val
 
                 output = {
-                    "batch_loss": np.round(loss.data.cpu().detach().numpy(), 5),
-                    "avg_loss": np.round(total_loss / (i + 1), 5),
+                    "batch_loss": round(loss_val, 5),
+                    "avg_loss": round(total_loss / (i + 1), 5),
                     "norm": norm,
                 }
 
@@ -163,6 +176,7 @@ def train(
                     model=model,
                     datamodule=datamodule,
                     device=device,
+                    config=config,
                     image_metrics=image_metrics,
                     pixel_metrics=pixel_metrics,
                     normalize=True,
@@ -182,6 +196,7 @@ def test(
     model: SuperSimpleNet,
     datamodule: LightningDataModule,
     device: str,
+    config: dict,
     image_metrics: dict[str, Metric],
     pixel_metrics: dict[str, Metric],
     normalize: bool = True,
@@ -190,6 +205,11 @@ def test(
 ):
     model.to(device)
     model.eval()
+
+    gpu_transforms = v2.Compose([
+        v2.Resize(size=config["image_size"], antialias=True),
+        v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ]).to(device)
 
     # for anomaly map max as image score
     seg_image_metrics = {}
@@ -215,19 +235,23 @@ def test(
         "mask_path": [],
     }
     for batch in tqdm(test_loader, position=0, leave=True):
-        image_batch = batch["image"].to(device)
+        image_batch = batch["image"].to(device, non_blocking=True)
+        mask_batch = batch["mask"].to(device, dtype=torch.float32, non_blocking=True)
+
+        image_batch = gpu_transforms(image_batch)
+        mask_batch = v2.functional.resize(mask_batch, size=config["image_size"], antialias=False)
+
         anomaly_map, anomaly_score = model.forward(image_batch)
 
-        anomaly_map = anomaly_map.detach().cpu()
-        anomaly_score = anomaly_score.detach().cpu()
-
-        results["anomaly_map"].append(torch.sigmoid(anomaly_map).detach().cpu())
-        results["gt_mask"].append(batch["mask"].detach().cpu())
-
-        results["score"].append(torch.sigmoid(anomaly_score))
-        results["seg_score"].append(
-            anomaly_map.reshape(anomaly_map.shape[0], -1).max(dim=1).values
-        )
+        anomaly_map_sig = torch.sigmoid(anomaly_map).detach()
+        anomaly_score_sig = torch.sigmoid(anomaly_score).detach()
+        seg_score = anomaly_map.detach().reshape(anomaly_map.shape[0], -1).max(dim=1).values
+        
+        results["anomaly_map"].append(anomaly_map_sig.cpu())
+        results["score"].append(anomaly_score_sig.cpu())
+        results["seg_score"].append(seg_score.cpu())
+        
+        results["gt_mask"].append(mask_batch.detach().cpu())
         results["label"].append(batch["label"].detach().cpu())
 
         results["image_path"].extend(batch["image_path"])
@@ -346,6 +370,7 @@ def train_and_eval(model, datamodule, config, device):
         epochs=config["epochs"],
         datamodule=datamodule,
         device=device,
+        config=config,
         image_metrics=image_metrics,
         pixel_metrics=pixel_metrics,
         clip_grad=config["clip_grad"],
@@ -370,6 +395,7 @@ def train_and_eval(model, datamodule, config, device):
         model=model,
         datamodule=datamodule,
         device=device,
+        config=config,
         image_metrics=image_metrics,
         pixel_metrics=pixel_metrics,
         normalize=True,
@@ -696,7 +722,7 @@ def run_unsup(data_name):
         "gamma": 0.4,
         "stop_grad": True,
         "clip_grad": False,
-        "eval_step_size": 4,
+        "eval_step_size": 20,
         "results_save_path": Path("./results"),
     }
     if data_name == "visa":
@@ -737,7 +763,7 @@ def run_sup(data_name):
         "gamma": 0.4,
         "stop_grad": False,
         "clip_grad": True,
-        "eval_step_size": 4,
+        "eval_step_size": 20,
         "results_save_path": Path("./results"),
     }
     if data_name == "sensum":

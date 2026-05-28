@@ -1,6 +1,7 @@
 from pathlib import Path
 
-import albumentations as A
+import torch
+from torchvision.transforms import v2
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
@@ -33,7 +34,7 @@ class SSNDataset(Dataset):
         self,
         root: Path,
         supervision: Supervision,
-        transform: A.Compose,
+        transform: v2.Compose,
         split: Split,
         flips: bool,
         normal_flips: bool,
@@ -63,15 +64,15 @@ class SSNDataset(Dataset):
         self.num_pos: int
         self.num_neg: int
 
-        self.vflip = A.VerticalFlip(p=1.0)
-        self.hflip = A.HorizontalFlip(p=1.0)
-        self.rotate = A.Rotate(limit=(180, 180), p=1.0)
+        self.vflip = v2.RandomVerticalFlip(p=1.0)
+        self.hflip = v2.RandomHorizontalFlip(p=1.0)
+        self.rotate = v2.RandomRotation(degrees=[180.0, 180.0])
 
-        self.random_normal_rotate = A.Compose(
+        self.random_normal_rotate = v2.Compose(
             [
-                A.VerticalFlip(p=0.3),
-                A.HorizontalFlip(p=0.3),
-                A.Rotate(limit=90, p=0.3),
+                v2.RandomVerticalFlip(p=0.3),
+                v2.RandomHorizontalFlip(p=0.3),
+                v2.RandomApply([v2.RandomRotation(degrees=[-90.0, 90.0])], p=0.3),
             ]
         )
 
@@ -227,7 +228,7 @@ class SSNDataset(Dataset):
 
         return image_path, mask_path, label_index, is_segmented
 
-    def get_flip_augmentation(self, index) -> A.DualTransform | None | A.Compose:
+    def get_flip_augmentation(self, index) -> v2.Transform | None | v2.Compose:
         """
         Get specified flip augmentation for current image if flips is true.
 
@@ -317,52 +318,52 @@ class SSNDataset(Dataset):
 
         image_path, mask_path, label_index, is_segmented = self.get_sample_data(index)
 
-        image = read_image(image_path)
-        item = dict(
-            image_path=image_path,
-            label=label_index,
-            is_segmented=is_segmented,
-        )
+        image_np = read_image(image_path)
+        image = torch.from_numpy(image_np).permute(2, 0, 1).float() / 255.0
 
         if label_index == 0 or not is_segmented:
             # normal or not segmented are all zero
-            mask = np.zeros(shape=image.shape[:2])
+            mask = torch.zeros((1, image.shape[1], image.shape[2]), dtype=torch.float32)
         else:
-            mask = cv2.imread(mask_path, flags=0) / 255.0
+            mask_np = cv2.imread(mask_path, flags=0)
 
             if self.dilate is not None and self.split == Split.TRAIN:
-                mask = cv2.dilate(mask, np.ones((self.dilate, self.dilate)))
+                mask_np = cv2.dilate(mask_np, np.ones((self.dilate, self.dilate)))
+            mask = torch.from_numpy(mask_np).unsqueeze(0).float() / 255.0
 
         if (self.flips or self.normal_flips) and (self.split == Split.TRAIN):
             # if current image is selected to be flip augmented
             flip_augmentation = self.get_flip_augmentation(index)
             if flip_augmentation is not None:
-                flip_transformed = flip_augmentation(image=image, mask=mask)
-                image = flip_transformed["image"]
-                mask = flip_transformed["mask"]
+                image, mask = flip_augmentation(image, mask)
+
+        item = dict(
+            image_path=image_path,
+            label=label_index,
+            is_segmented=is_segmented,
+            image=image,
+            mask_path=mask_path,
+            mask=mask
+        )
 
         if self.dt is not None:
-            # apply distance transform
             wp, p = self.dt
-            # if normal all 1, otherwise dist transform
+            
             if label_index == 0:
-                loss_mask = np.ones(shape=image.shape[:2])
+                # Normal image: loss_mask is all ones. Shape matches H, W of the image.
+                loss_mask_np = np.ones(shape=(image.shape[1], image.shape[2]), dtype=np.float32)
             else:
-                loss_mask = self.distance_transform(mask, wp, p)
+                # Anomalous image: compute distance transform on the ALREADY FLIPPED mask.
+                # mask is a Tensor of shape (1, H, W). We squeeze it to (H, W) for SciPy.
+                mask_np_2d = mask.squeeze(0).numpy()
+                loss_mask_np = self.distance_transform(mask_np_2d, wp, p)
+            
+            # Convert the result back to a Tensor (1, H, W) and add to dictionary
+            item["loss_mask"] = torch.from_numpy(loss_mask_np).unsqueeze(0).float()
 
-            transformed = self.transform(image=image, mask=mask, loss_mask=loss_mask)
-            item["loss_mask"] = transformed["loss_mask"]
-        else:
-            transformed = self.transform(image=image, mask=mask)
-
-        item["image"] = transformed["image"]
-        item["mask_path"] = mask_path
-        item["mask"] = transformed["mask"]
-
-        self.counter = self.counter + 1
-
+        # Update counters
+        self.counter += 1
         if self.debug and self.counter == len(self):
-            # print number of elements in freq table at end of epoch
             print(self.neg_retrieval_freq.sum())
 
         return item
