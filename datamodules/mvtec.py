@@ -1,7 +1,6 @@
 from pathlib import Path
 import albumentations as A
 import pandas as pd
-from anomalib.data.mvtec import make_mvtec_dataset
 from anomalib.data.utils import Split, InputNormalizationMethod
 from pandas import DataFrame
 
@@ -43,21 +42,53 @@ class MVTECDataset(SSNDataset):
         self.root_category = Path(root) / Path(category)
 
     def make_dataset(self) -> tuple[DataFrame, DataFrame]:
-        # Extract the exact string value from the Enum to prevent Pandas silent filtering bugs
+        """
+        Custom parser to bypass Anomalib's hardcoded MVTec logic.
+        Handles custom datasets with .bmp files and flexible mask naming.
+        """
+        samples_list = []
+        # Safely extract the string representation of the split (e.g., "train" or "test")
         split_str = self.split.value if hasattr(self.split, "value") else str(self.split)
+        split_dir = self.root_category / split_str
         
-        # Use a tuple for extensions to ensure compatibility with internal PyTorch generators
-        supported_ext = (".png", ".jpg", ".bmp")
+        # Look for all .bmp images in the specified directory
+        for img_path in split_dir.rglob("*.bmp"):
+            label = img_path.parent.name
+            mask_path = ""
         
-        # Pass the extracted string instead of the raw Enum object
-        samples = make_mvtec_dataset(
-            self.root_category, 
-            split=split_str, 
-            extensions=supported_ext
-        )
-        
-        # Return samples and an empty dataframe for the anomalous segment
-        return samples, pd.DataFrame()
+            # Match masks (ONLY for the anomalous test set)
+            if split_str == "test" and label != "good":
+                mask_dir = self.root_category / "ground_truth" / label
+                
+                # Search for the exact .bmp file with the _mask suffix
+                mask_file = mask_dir / f"{img_path.stem}_mask.bmp"
+                
+                if mask_file.exists():
+                    mask_path = str(mask_file)
+                else:
+                    # Provide explicit feedback if a mask is missing to prevent silent failures
+                    raise FileNotFoundError(
+                        f"Mask not found!\n"
+                        f"Image: {img_path.name}\n"
+                        f"Expected mask: {mask_file}"
+                    )
+            
+            # Construct the row dictionary required by the DataLoader
+            samples_list.append({
+                "path": str(self.root_category),
+                "split": split_str,
+                "label": label,
+                "image_path": str(img_path),
+                "mask_path": mask_path,
+                "label_index": 0 if label == "good" else 1
+            })
+            
+        if not samples_list:
+            raise RuntimeError(f"No .bmp images found in {split_dir}")
+            
+        # Return the DataFrame expected by the datamodule
+        samples_df = pd.DataFrame(samples_list)
+        return samples_df, pd.DataFrame()
 
 
 class MVTec(SSNDataModule):
