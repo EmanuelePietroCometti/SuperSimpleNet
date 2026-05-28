@@ -43,8 +43,20 @@ class MVTECDataset(SSNDataset):
         self.root_category = Path(root) / Path(category)
 
     def make_dataset(self) -> tuple[DataFrame, DataFrame]:
-        samples = make_mvtec_dataset(self.root_category, self.split)
-        # return empty for anomalous
+        # Extract the exact string value from the Enum to prevent Pandas silent filtering bugs
+        split_str = self.split.value if hasattr(self.split, "value") else str(self.split)
+        
+        # Use a tuple for extensions to ensure compatibility with internal PyTorch generators
+        supported_ext = (".png", ".jpg", ".bmp")
+        
+        # Pass the extracted string instead of the raw Enum object
+        samples = make_mvtec_dataset(
+            self.root_category, 
+            split=split_str, 
+            extensions=supported_ext
+        )
+        
+        # Return samples and an empty dataframe for the anomalous segment
         return samples, pd.DataFrame()
 
 

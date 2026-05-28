@@ -63,9 +63,9 @@ class SSNDataset(Dataset):
         self.num_pos: int
         self.num_neg: int
 
-        self.vflip = A.VerticalFlip(always_apply=True)
-        self.hflip = A.HorizontalFlip(always_apply=True)
-        self.rotate = A.Rotate(limit=(180, 180), always_apply=True)
+        self.vflip = A.VerticalFlip(p=1.0)
+        self.hflip = A.HorizontalFlip(p=1.0)
+        self.rotate = A.Rotate(limit=(180, 180), p=1.0)
 
         self.random_normal_rotate = A.Compose(
             [

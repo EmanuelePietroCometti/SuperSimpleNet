@@ -19,8 +19,9 @@ import torch
 import torch.nn.functional as F
 from pytorch_lightning import LightningDataModule, seed_everything
 
-from torchmetrics import AveragePrecision, Metric
-from anomalib.utils.metrics import AUROC, AUPRO
+from torchmetrics.classification import BinaryAveragePrecision, BinaryAUROC
+from torchmetrics import Metric
+from anomalib.utils.metrics import AUPRO
 
 from datamodules import ksdd2, sensum
 from datamodules.ksdd2 import KSDD2, NumSegmented
@@ -255,12 +256,14 @@ def test(
 
     results_dict = {}
     for name, metric in image_metrics.items():
-        metric.update(results["score"], results["label"])
+        # Targets must be strictly integer types (long) for binary classification metrics
+        metric.update(results["score"], results["label"].type(torch.long))
         results_dict[name] = metric.to(device).compute().item()
         metric.to("cpu")
 
     for name, metric in seg_image_metrics.items():
-        metric.update(results["seg_score"], results["label"])
+        # Apply the same casting to long for the segmented scores
+        metric.update(results["seg_score"], results["label"].type(torch.long))
         results_dict[name] = metric.to(device).compute().item()
         metric.to("cpu")
 
@@ -271,8 +274,9 @@ def test(
             am[am != am] = 0
             results["anomaly_map"] = am
 
+            # Pass ground truth mask as long integers to comply with TorchMetrics API
             metric.update(
-                results["anomaly_map"], results["gt_mask"].type(torch.float32)
+                results["anomaly_map"], results["gt_mask"].type(torch.long)
             )
             results_dict[name] = metric.to(device).compute().item()
         except RuntimeError:
@@ -328,13 +332,13 @@ def train_and_eval(model, datamodule, config, device):
         wandb.init(project=config["wandb_project"], config=config, name=config["name"])
 
     image_metrics = {
-        "I-AUROC": AUROC(),
-        "AP-det": AveragePrecision(num_classes=1),
+        "I-AUROC": BinaryAUROC(thresholds=100),
+        "AP-det": BinaryAveragePrecision(thresholds=100),
     }
     pixel_metrics = {
-        "P-AUROC": AUROC(),
+        "P-AUROC": BinaryAUROC(thresholds=100),
         "AUPRO": AUPRO(),
-        "AP-loc": AveragePrecision(num_classes=1),
+        "AP-loc": BinaryAveragePrecision(thresholds=100),
     }
 
     train(
@@ -391,8 +395,7 @@ def main_mvtec(device, config):
     config["dataset"] = "mvtec"
     config["ratio"] = 1
 
-    categories = [
-        "screw",
+    """"screw",
         "pill",
         "capsule",
         "carpet",
@@ -407,6 +410,10 @@ def main_mvtec(device, config):
         "bottle",
         "hazelnut",
         "leather",
+        "carpet","""
+
+    categories = [
+        "reda"
     ]
 
     results_writer = ResultsWriter(

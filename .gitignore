@@ -1,0 +1,77 @@
+# Build folders
+[Bb]in/
+[Oo]bj/
+artifacts/
+TestResults/
+
+# Visual Studio
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Rider
+.idea/
+*.sln.iml
+
+# User-specific files
+*.rsuser
+*.suo
+*.user
+*.userprefs
+
+# MonoDevelop
+*.pidb
+*.userprefs
+
+# Build results
+*.dll
+*.exe
+*.app
+*.apk
+*.msi
+*.log
+
+# NuGet
+*.nupkg
+*.snupkg
+packages/
+.nuget/packages/
+project.lock.json
+project.fragment.lock.json
+
+# Visual Studio Code
+.vscode/
+
+# IIS Express
+/.vs/
+
+# Resharper
+_ReSharper*/
+*.[Rr]e[Ss]harper
+*.DotSettings.user
+
+# Misc
+*.dbmdl
+*.dbproj.schemaview
+*.cache
+*.pdb
+*.mdb
+*.opendb
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+
+# Folders
+results_backup/
+dataset/
+mvtec/
+__pycache__/
