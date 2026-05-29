@@ -121,11 +121,13 @@ class SSNDataModule(LightningDataModule, ABC):
 
     def test_dataloader(self) -> EVAL_DATALOADERS:
         """Get test dataloader."""
+        persist = self.num_workers > 0
         return DataLoader(
             dataset=self.test_data,
             shuffle=False,
             batch_size=self.eval_batch_size,
             num_workers=self.num_workers,
             collate_fn=collate_fn,
-            pin_memory=True
+            pin_memory=True, 
+            persistent_workers=persist
         )

@@ -59,6 +59,7 @@ def train(
 
     model.train()
     train_loader = datamodule.train_dataloader()
+    test_loader = datamodule.test_dataloader()
     for epoch in range(epochs):
         model.train()
         total_loss = 0
@@ -174,7 +175,7 @@ def train(
             if (epoch + 1) % eval_step_size == 0:
                 results = test(
                     model=model,
-                    datamodule=datamodule,
+                    test_loader=test_loader,
                     device=device,
                     config=config,
                     image_metrics=image_metrics,
@@ -194,7 +195,7 @@ def train(
 @torch.no_grad()
 def test(
     model: SuperSimpleNet,
-    datamodule: LightningDataModule,
+    test_loader,
     device: str,
     config: dict,
     image_metrics: dict[str, Metric],
@@ -215,16 +216,15 @@ def test(
     seg_image_metrics = {}
 
     for m_name, metric in image_metrics.items():
-        metric.cpu()
+        metric.to(device)
         metric.reset()
 
         seg_image_metrics[f"seg-{m_name}"] = copy.deepcopy(metric)
 
     for metric in pixel_metrics.values():
-        metric.cpu()
+        metric.to(device)
         metric.reset()
 
-    test_loader = datamodule.test_dataloader()
     results = {
         "anomaly_map": [],
         "gt_mask": [],
@@ -246,6 +246,23 @@ def test(
         anomaly_map_sig = torch.sigmoid(anomaly_map).detach()
         anomaly_score_sig = torch.sigmoid(anomaly_score).detach()
         seg_score = anomaly_map.detach().reshape(anomaly_map.shape[0], -1).max(dim=1).values
+        seg_score_sig = torch.sigmoid(seg_score)
+
+        label_long = batch["label"].to(device, dtype=torch.long, non_blocking=True)
+        mask_long = mask_batch.to(dtype=torch.long)
+
+        for metric in image_metrics.values():
+            metric.update(anomaly_score_sig, label_long)
+
+        for metric in seg_image_metrics.values():
+            metric.update(seg_score_sig, label_long)
+
+        for name, metric in pixel_metrics.items():
+            try:
+                am_clean = torch.nan_to_num(anomaly_map_sig, nan=0.0)
+                metric.update(am_clean, mask_long)
+            except RuntimeError:
+                pass
         
         results["anomaly_map"].append(anomaly_map_sig.cpu())
         results["score"].append(anomaly_score_sig.cpu())
@@ -257,95 +274,68 @@ def test(
         results["image_path"].extend(batch["image_path"])
         results["mask_path"].extend(batch["mask_path"])
 
-    results["anomaly_map"] = torch.cat(results["anomaly_map"])
-    results["score"] = torch.cat(results["score"])
-    results["seg_score"] = torch.cat(results["seg_score"])
-    results["gt_mask"] = torch.cat(results["gt_mask"])
-    results["label"] = torch.cat(results["label"])
-
-    # normalize
-    if normalize:
-        results["anomaly_map"] = (
-            results["anomaly_map"] - results["anomaly_map"].flatten().min()
-        ) / (
-            results["anomaly_map"].flatten().max()
-            - results["anomaly_map"].flatten().min()
-        )
-        results["score"] = (results["score"] - results["score"].min()) / (
-            results["score"].max() - results["score"].min()
-        )
-        results["seg_score"] = (results["seg_score"] - results["seg_score"].min()) / (
-            results["seg_score"].max() - results["seg_score"].min()
-        )
-
     results_dict = {}
     for name, metric in image_metrics.items():
-        # Targets must be strictly integer types (long) for binary classification metrics
-        metric.update(results["score"], results["label"].type(torch.long))
-        results_dict[name] = metric.to(device).compute().item()
-        metric.to("cpu")
+        results_dict[name] = metric.compute().item()
 
     for name, metric in seg_image_metrics.items():
-        # Apply the same casting to long for the segmented scores
-        metric.update(results["seg_score"], results["label"].type(torch.long))
-        results_dict[name] = metric.to(device).compute().item()
-        metric.to("cpu")
+        results_dict[name] = metric.compute().item()
 
     for name, metric in pixel_metrics.items():
         try:
-            # avoid nan in early stages
-            am = results["anomaly_map"]
-            am[am != am] = 0
-            results["anomaly_map"] = am
-
-            # Pass ground truth mask as long integers to comply with TorchMetrics API
-            metric.update(
-                results["anomaly_map"], results["gt_mask"].type(torch.long)
-            )
-            results_dict[name] = metric.to(device).compute().item()
+            results_dict[name] = metric.compute().item()
         except RuntimeError:
-            # AUPRO in some cases with early predictions crashes cuda, so just skip it in that case
             results_dict[name] = 0
-        metric.to("cpu")
 
     for name, value in results_dict.items():
         print(f"{name}: {value} ", end="")
     print()
 
-    if image_save_path:
-        print("Visualizing")
-        visualizer = Visualizer(image_save_path)
-        visualizer.visualize(results)
+    if image_save_path or score_save_path:
+        results["anomaly_map"] = torch.cat(results["anomaly_map"])
+        results["score"] = torch.cat(results["score"])
+        results["seg_score"] = torch.cat(results["seg_score"])
+        results["gt_mask"] = torch.cat(results["gt_mask"])
+        results["label"] = torch.cat(results["label"])
 
-    score_dict = {}
-    if score_save_path:
-        # save both segscore and score to json
-        for img_path, score, seg_score, label in zip(
-            results["image_path"],
-            results["score"],
-            results["seg_score"],
-            results["label"],
-        ):
-            img_path = Path(img_path)
+        if normalize:
+            # Added 1e-8 to avoid division by zero in case of constant maps/scores
+            am_min, am_max = results["anomaly_map"].min(), results["anomaly_map"].max()
+            results["anomaly_map"] = (results["anomaly_map"] - am_min) / (am_max - am_min + 1e-8)
 
-            anomaly_type = img_path.parent.name
-            if anomaly_type not in score_dict:
-                score_dict[anomaly_type] = {"good": {}, "bad": {}}
+            s_min, s_max = results["score"].min(), results["score"].max()
+            results["score"] = (results["score"] - s_min) / (s_max - s_min + 1e-8)
 
-            # since some datasets (sensum) can have same names in bad and good
-            if label == 1:
-                kind = "bad"
-            else:
-                kind = "good"
+            ss_min, ss_max = results["seg_score"].min(), results["seg_score"].max()
+            results["seg_score"] = (results["seg_score"] - ss_min) / (ss_max - ss_min + 1e-8)
 
-            score_dict[anomaly_type][kind][img_path.stem] = {
-                "score": score.item(),
-                "seg_score": seg_score.item(),
-            }
+        if image_save_path:
+            print("Visualizing")
+            visualizer = Visualizer(image_save_path)
+            visualizer.visualize(results)
 
-        score_save_path.mkdir(exist_ok=True, parents=True)
-        with open(score_save_path / "scores.json", "w") as f:
-            json.dump(score_dict, f)
+        if score_save_path:
+            score_dict = {}
+            for img_path, score, seg_score, label in zip(
+                results["image_path"],
+                results["score"],
+                results["seg_score"],
+                results["label"],
+            ):
+                img_path = Path(img_path)
+                anomaly_type = img_path.parent.name
+                if anomaly_type not in score_dict:
+                    score_dict[anomaly_type] = {"good": {}, "bad": {}}
+
+                kind = "bad" if label == 1 else "good"
+                score_dict[anomaly_type][kind][img_path.stem] = {
+                    "score": score.item(),
+                    "seg_score": seg_score.item(),
+                }
+
+            score_save_path.mkdir(exist_ok=True, parents=True)
+            with open(score_save_path / "scores.json", "w") as f:
+                json.dump(score_dict, f)
 
     return results_dict
 
@@ -393,7 +383,7 @@ def train_and_eval(model, datamodule, config, device):
 
     results = test(
         model=model,
-        datamodule=datamodule,
+        test_loader=datamodule.test_dataloader(),
         device=device,
         config=config,
         image_metrics=image_metrics,
