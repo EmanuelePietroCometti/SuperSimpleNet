@@ -35,6 +35,10 @@ from common.visualizer import Visualizer
 from common.results_writer import ResultsWriter
 from common.loss import focal_loss
 from torchvision.transforms import v2
+import shutil
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.metrics import precision_recall_curve, confusion_matrix
 
 
 def train(
@@ -78,8 +82,6 @@ def train(
                 mask = batch["mask"].to(device, dtype=torch.float32, non_blocking=True)
 
                 image_batch = gpu_transforms(image_batch)
-                mask = v2.functional.resize(mask, size=config["image_size"], antialias=False)
-
 
                 mask = F.interpolate(
                     mask,
@@ -180,7 +182,7 @@ def train(
                     config=config,
                     image_metrics=image_metrics,
                     pixel_metrics=pixel_metrics,
-                    normalize=True,
+                    normalize=True
                 )
                 if LOG_WANDB:
                     wandb.log({**results, **output})
@@ -208,18 +210,15 @@ def test(
     model.eval()
 
     gpu_transforms = v2.Compose([
-        v2.Resize(size=config["image_size"], antialias=True),
         v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ]).to(device)
 
-    # for anomaly map max as image score
     seg_image_metrics = {}
 
     for m_name, metric in image_metrics.items():
         metric.to(device)
         metric.reset()
-
-        seg_image_metrics[f"seg-{m_name}"] = copy.deepcopy(metric)
+        seg_image_metrics[f"seg-{m_name}"] = copy.deepcopy(metric).to(device)
 
     for metric in pixel_metrics.values():
         metric.to(device)
@@ -234,12 +233,12 @@ def test(
         "image_path": [],
         "mask_path": [],
     }
+    
     for batch in tqdm(test_loader, position=0, leave=True):
         image_batch = batch["image"].to(device, non_blocking=True)
         mask_batch = batch["mask"].to(device, dtype=torch.float32, non_blocking=True)
 
         image_batch = gpu_transforms(image_batch)
-        mask_batch = v2.functional.resize(mask_batch, size=config["image_size"], antialias=False)
 
         anomaly_map, anomaly_score = model.forward(image_batch)
 
@@ -299,7 +298,6 @@ def test(
         results["label"] = torch.cat(results["label"])
 
         if normalize:
-            # Added 1e-8 to avoid division by zero in case of constant maps/scores
             am_min, am_max = results["anomaly_map"].min(), results["anomaly_map"].max()
             results["anomaly_map"] = (results["anomaly_map"] - am_min) / (am_max - am_min + 1e-8)
 
@@ -313,6 +311,51 @@ def test(
             print("Visualizing")
             visualizer = Visualizer(image_save_path)
             visualizer.visualize(results)
+
+            print("Generating Confusion Matrix and Separating Images...")
+            y_true = results["label"].numpy()
+            y_scores = results["score"].numpy()
+
+            precision, recall, thresholds = precision_recall_curve(y_true, y_scores)
+            f1_scores = 2 * (precision * recall) / (precision + recall + 1e-8)
+            best_threshold_idx = np.argmax(f1_scores)
+            best_threshold = thresholds[best_threshold_idx] if best_threshold_idx < len(thresholds) else thresholds[-1]
+
+            y_pred = (y_scores >= best_threshold).astype(int)
+
+            classification_dir = image_save_path.parent / "classification_results"
+            classification_dir.mkdir(exist_ok=True, parents=True)
+
+            cm = confusion_matrix(y_true, y_pred)
+            plt.figure(figsize=(6, 5))
+            sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", 
+                        xticklabels=["Good (0)", "Anomaly (1)"], 
+                        yticklabels=["Good (0)", "Anomaly (1)"])
+            plt.xlabel("Predicted Label")
+            plt.ylabel("True Label")
+            plt.title(f"Confusion Matrix (Threshold: {best_threshold:.3f})")
+            plt.tight_layout()
+            plt.savefig(classification_dir / "confusion_matrix.png")
+            plt.close()
+
+            for cat in ["TP", "TN", "FP", "FN"]:
+                (classification_dir / cat).mkdir(exist_ok=True, parents=True)
+
+            for img_path_str, true_lbl, pred_lbl in zip(results["image_path"], y_true, y_pred):
+                img_path = Path(img_path_str)
+                
+                if true_lbl == 1 and pred_lbl == 1:
+                    dest_folder = "TP"
+                elif true_lbl == 0 and pred_lbl == 0:
+                    dest_folder = "TN"
+                elif true_lbl == 0 and pred_lbl == 1:
+                    dest_folder = "FP"
+                elif true_lbl == 1 and pred_lbl == 0:
+                    dest_folder = "FN"
+
+                shutil.copy(img_path, classification_dir / dest_folder / img_path.name)
+                
+            print(f"Classification separated in: {classification_dir}")
 
         if score_save_path:
             score_dict = {}
@@ -691,7 +734,7 @@ def run_unsup(data_name):
         "num_workers": 8,
         "setup_name": "superSimpleNet",
         "backbone": "wide_resnet50_2",
-        "layers": ["layer2", "layer3"],
+        "layers": ["layer1","layer2", "layer3"],
         "patch_size": 3,
         "noise": True,
         "perlin": True,
@@ -703,16 +746,16 @@ def run_unsup(data_name):
         # "perlin_thr": x,
         "image_size": (256, 256),
         "seed": 42,
-        "batch": 32,
-        "epochs": 300,
-        "flips": False,  # makes no difference, just faster if false to avoid computation
+        "batch": 4,
+        "epochs": 10,
+        "flips": True,  # makes no difference, just faster if false to avoid computation
         "seg_lr": 0.0002,
         "dec_lr": 0.0002,
         "adapt_lr": 0.0001,
         "gamma": 0.4,
         "stop_grad": True,
         "clip_grad": False,
-        "eval_step_size": 20,
+        "eval_step_size": 5,
         "results_save_path": Path("./results"),
     }
     if data_name == "visa":
@@ -733,7 +776,7 @@ def run_sup(data_name):
         "dt": (3, 2),   # distance transform
         "dilate": 7,    # dilate mask
         "backbone": "wide_resnet50_2",
-        "layers": ["layer2", "layer3"],
+        "layers": ["layer1","layer2", "layer3"],
         "patch_size": 3,
         "noise": True,
         "perlin": True,
@@ -744,8 +787,8 @@ def run_sup(data_name):
         "noise_std": 0.015,
         "perlin_thr": 0.6,
         "seed": 456654,
-        "batch": 32,
-        "epochs": 300,
+        "batch": 4,
+        "epochs": 10,
         "flips": True,
         "seg_lr": 0.0002,
         "dec_lr": 0.0002,
@@ -753,7 +796,7 @@ def run_sup(data_name):
         "gamma": 0.4,
         "stop_grad": False,
         "clip_grad": True,
-        "eval_step_size": 20,
+        "eval_step_size": 5,
         "results_save_path": Path("./results"),
     }
     if data_name == "sensum":

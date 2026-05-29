@@ -321,6 +321,9 @@ class SSNDataset(Dataset):
         image_np = read_image(image_path)
         image = torch.from_numpy(image_np).permute(2, 0, 1).float() / 255.0
 
+        if self.transform is not None:
+            image = self.transform(image)
+
         if label_index == 0 or not is_segmented:
             # normal or not segmented are all zero
             mask = torch.zeros((1, image.shape[1], image.shape[2]), dtype=torch.float32)
@@ -330,6 +333,10 @@ class SSNDataset(Dataset):
             if self.dilate is not None and self.split == Split.TRAIN:
                 mask_np = cv2.dilate(mask_np, np.ones((self.dilate, self.dilate)))
             mask = torch.from_numpy(mask_np).unsqueeze(0).float() / 255.0
+
+            if self.transform is not None:
+                from torchvision.transforms import v2
+                mask = v2.functional.resize(mask, size=(image.shape[1], image.shape[2]), antialias=False)
 
         if (self.flips or self.normal_flips) and (self.split == Split.TRAIN):
             # if current image is selected to be flip augmented

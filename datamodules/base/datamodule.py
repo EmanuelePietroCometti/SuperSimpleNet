@@ -11,6 +11,8 @@ from torch.utils.data import DataLoader
 from datamodules.base import Supervision
 from datamodules.base.dataset import SSNDataset
 
+from torchvision.transforms import v2
+
 
 class SSNDataModule(LightningDataModule, ABC):
     """
@@ -60,8 +62,8 @@ class SSNDataModule(LightningDataModule, ABC):
             raise Exception(
                 "Can't use more workers than 1 with positive samples due to statistic tracking inside workers"
             )
-        self.transform_train = None
-        self.transform_eval = None
+        self.transform_train = v2.Resize(size=image_size, antialias=True)
+        self.transform_eval = v2.Resize(size=image_size, antialias=True)
 
     @property
     def is_setup(self) -> bool:
@@ -120,7 +122,7 @@ class SSNDataModule(LightningDataModule, ABC):
         )
 
     def test_dataloader(self) -> EVAL_DATALOADERS:
-        """Get test dataloader."""
+        """Get test dataloader with persistent workers to avoid CPU bottlenecks."""
         persist = self.num_workers > 0
         return DataLoader(
             dataset=self.test_data,
@@ -128,6 +130,6 @@ class SSNDataModule(LightningDataModule, ABC):
             batch_size=self.eval_batch_size,
             num_workers=self.num_workers,
             collate_fn=collate_fn,
-            pin_memory=True, 
+            pin_memory=True,
             persistent_workers=persist
         )

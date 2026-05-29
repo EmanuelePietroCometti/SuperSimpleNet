@@ -2,6 +2,12 @@ import copy
 import json
 from pathlib import Path
 
+import shutil
+import matplotlib.pyplot as plt
+import seaborn as sns
+import numpy as np
+from sklearn.metrics import precision_recall_curve, confusion_matrix
+
 import torch
 from anomalib.utils.metrics import AUROC, AUPRO
 from torchmetrics import Metric, AveragePrecision
@@ -129,7 +135,8 @@ def eval(
     print()
 
     if image_save_path:
-        print("Visualizing")
+        # Use the existing visualizer for anomaly maps
+        print("Visualizing Anomaly Maps...")
         visualizer = Visualizer(image_save_path)
         visualizer.visualize(results)
 
@@ -164,7 +171,6 @@ def eval(
             json.dump(score_dict, f)
 
     return results_dict
-
 
 def get_sensum(config):
     data = []
@@ -359,6 +365,51 @@ def generate_result_json(run_ids, datasets, ratios, res_path):
     with open("./res_json/ssn.json", "w") as f:
         json.dump(res_json, f)
 
+def compute_confusion_matrix(results, image_save_path):
+    """Chiamata solo a fine training, non durante la validazione."""
+    print("Generating Confusion Matrix and Separating Images...")
+    y_true = results["label"].numpy()
+    y_scores = results["score"].numpy()
+
+    precision, recall, thresholds = precision_recall_curve(y_true, y_scores)
+    f1_scores = 2 * (precision * recall) / (precision + recall + 1e-8)
+    best_threshold_idx = np.argmax(f1_scores)
+    best_threshold = thresholds[best_threshold_idx] if best_threshold_idx < len(thresholds) else thresholds[-1]
+
+    y_pred = (y_scores >= best_threshold).astype(int)
+
+    classification_dir = image_save_path / "classification"
+    classification_dir.mkdir(exist_ok=True, parents=True)
+
+    cm = confusion_matrix(y_true, y_pred)
+    plt.figure(figsize=(6, 5))
+    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
+                xticklabels=["Good (0)", "Anomaly (1)"],
+                yticklabels=["Good (0)", "Anomaly (1)"])
+    plt.xlabel("Predicted Label")
+    plt.ylabel("True Label")
+    plt.title(f"Confusion Matrix (Threshold: {best_threshold:.3f})")
+    plt.tight_layout()
+    plt.savefig(classification_dir / "confusion_matrix.png")
+    plt.close()
+
+    for cat in ["TP", "TN", "FP", "FN"]:
+        (classification_dir / cat).mkdir(exist_ok=True, parents=True)
+
+    for img_path_str, true_lbl, pred_lbl in zip(results["image_path"], y_true, y_pred):
+        img_path = Path(img_path_str)
+        if true_lbl == 1 and pred_lbl == 1:
+            dest_folder = "TP"
+        elif true_lbl == 0 and pred_lbl == 0:
+            dest_folder = "TN"
+        elif true_lbl == 0 and pred_lbl == 1:
+            dest_folder = "FP"
+        else:
+            dest_folder = "FN"
+        shutil.copy(img_path, classification_dir / dest_folder / img_path.name)
+
+    print(f"Classification separated in: {classification_dir}")
+
 
 def run_eval(datasets, ratios, run_id, res_path):
     """
@@ -455,6 +506,10 @@ def run_eval(datasets, ratios, run_id, res_path):
                 else None,
             )
             results["run_id"] = config["run_id"]
+
+            if config["image_save_path"]:
+                save_path = config["image_save_path"] / config["run_id"] / dataset / cat / config["ratio"]
+                compute_confusion_matrix(results, save_path)
 
             if dataset == "sensum":
                 # for sensum remove fold num when saving
