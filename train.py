@@ -734,20 +734,20 @@ def run_unsup(data_name):
         "num_workers": 8,
         "setup_name": "superSimpleNet",
         "backbone": "wide_resnet50_2",
-        "layers": ["layer1","layer2", "layer3"],
+        "layers": ["layer2", "layer3"],
         "patch_size": 3,
         "noise": True,
         "perlin": True,
         "no_anomaly": "empty",
         "bad": True,
         "overlap": True,  # makes no difference, just faster if false to avoid computation
-        "adapt_cls_feat": False,  # (JIMS extension) cls features are not adapted
+        "adapt_cls_feat": True,  # (JIMS extension) cls features are not adapted
         "noise_std": 0.015,
-        # "perlin_thr": x,
+        "perlin_thr": 0.2,
         "image_size": (256, 256),
         "seed": 42,
         "batch": 4,
-        "epochs": 10,
+        "epochs": 300,
         "flips": True,  # makes no difference, just faster if false to avoid computation
         "seg_lr": 0.0002,
         "dec_lr": 0.0002,
@@ -755,7 +755,7 @@ def run_unsup(data_name):
         "gamma": 0.4,
         "stop_grad": True,
         "clip_grad": False,
-        "eval_step_size": 5,
+        "eval_step_size": 20,
         "results_save_path": Path("./results"),
     }
     if data_name == "visa":
@@ -776,19 +776,19 @@ def run_sup(data_name):
         "dt": (3, 2),   # distance transform
         "dilate": 7,    # dilate mask
         "backbone": "wide_resnet50_2",
-        "layers": ["layer1","layer2", "layer3"],
+        "layers": ["layer2", "layer3"],
         "patch_size": 3,
         "noise": True,
         "perlin": True,
         "no_anomaly": "empty",
         "bad": True,
         "overlap": False,
-        "adapt_cls_feat": False,  # (JIMS extension) cls features are not adapted
+        "adapt_cls_feat": True,  # (JIMS extension) cls features are not adapted
         "noise_std": 0.015,
-        "perlin_thr": 0.6,
+        "perlin_thr": 0.2,
         "seed": 456654,
         "batch": 4,
-        "epochs": 10,
+        "epochs": 300,
         "flips": True,
         "seg_lr": 0.0002,
         "dec_lr": 0.0002,
@@ -796,7 +796,7 @@ def run_sup(data_name):
         "gamma": 0.4,
         "stop_grad": False,
         "clip_grad": True,
-        "eval_step_size": 5,
+        "eval_step_size": 20,
         "results_save_path": Path("./results"),
     }
     if data_name == "sensum":
