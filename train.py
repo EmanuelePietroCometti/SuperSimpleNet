@@ -734,7 +734,7 @@ def run_unsup(data_name):
         "num_workers": 8,
         "setup_name": "superSimpleNet",
         "backbone": "wide_resnet50_2",
-        "layers": ["layer2", "layer3"],
+        "layers": ["layer1", "layer2", "layer3"],
         "patch_size": 3,
         "noise": True,
         "perlin": True,
@@ -776,7 +776,7 @@ def run_sup(data_name):
         "dt": (3, 2),   # distance transform
         "dilate": 2,    # dilate mask
         "backbone": "wide_resnet50_2",
-        "layers": ["layer2", "layer3"],
+        "layers": ["layer1", "layer2", "layer3"],
         "patch_size": 3,
         "noise": True,
         "perlin": True,
