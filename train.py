@@ -743,7 +743,7 @@ def run_unsup(data_name):
         "overlap": True,  # makes no difference, just faster if false to avoid computation
         "adapt_cls_feat": True,  # (JIMS extension) cls features are not adapted
         "noise_std": 0.015,
-        "perlin_thr": 0.2,
+        "perlin_thr": 0.6,
         "image_size": (256, 256),
         "seed": 42,
         "batch": 4,
@@ -762,7 +762,7 @@ def run_unsup(data_name):
         config["perlin_thr"] = 0.6
         main_visa(device=device, config=config)
     if data_name == "mvtec":
-        config["perlin_thr"] = 0.2
+        config["perlin_thr"] = 0.6
         main_mvtec(device=device, config=config)
 
 
@@ -774,7 +774,7 @@ def run_sup(data_name):
         "num_workers": 1,
         "setup_name": "superSimpleNet",
         "dt": (3, 2),   # distance transform
-        "dilate": 7,    # dilate mask
+        "dilate": 2,    # dilate mask
         "backbone": "wide_resnet50_2",
         "layers": ["layer2", "layer3"],
         "patch_size": 3,
@@ -785,7 +785,7 @@ def run_sup(data_name):
         "overlap": False,
         "adapt_cls_feat": True,  # (JIMS extension) cls features are not adapted
         "noise_std": 0.015,
-        "perlin_thr": 0.2,
+        "perlin_thr": 0.6,
         "seed": 456654,
         "batch": 4,
         "epochs": 300,
