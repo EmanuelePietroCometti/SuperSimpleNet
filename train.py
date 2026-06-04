@@ -742,7 +742,7 @@ def run_unsup(data_name):
         "bad": True,
         "overlap": True,  # makes no difference, just faster if false to avoid computation
         "adapt_cls_feat": True,  # (JIMS extension) cls features are not adapted
-        "noise_std": 0.015,
+        "noise_std": 0.035,
         "perlin_thr": 0.6,
         "image_size": (256, 256),
         "seed": 42,
@@ -784,7 +784,7 @@ def run_sup(data_name):
         "bad": True,
         "overlap": False,
         "adapt_cls_feat": True,  # (JIMS extension) cls features are not adapted
-        "noise_std": 0.015,
+        "noise_std": 0.035,
         "perlin_thr": 0.6,
         "seed": 456654,
         "batch": 4,
