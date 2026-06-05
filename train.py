@@ -757,6 +757,10 @@ def run_unsup(data_name):
         "clip_grad": False,
         "eval_step_size": 20,
         "results_save_path": Path("./results"),
+        # Added hyperparameters for ablations
+        "weight_decay": 0.00001,
+        "spatial_dropout": 0.2,
+        "fc_dropout": 0.4
     }
     if data_name == "visa":
         config["perlin_thr"] = 0.6
@@ -798,6 +802,10 @@ def run_sup(data_name):
         "clip_grad": True,
         "eval_step_size": 20,
         "results_save_path": Path("./results"),
+        # Added hyperparameters for ablations
+        "weight_decay": 0.00001,
+        "spatial_dropout": 0.2,
+        "fc_dropout": 0.4
     }
     if data_name == "sensum":
         config["ratio"] = RatioSegmented.M100.value

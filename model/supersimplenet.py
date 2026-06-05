@@ -113,21 +113,23 @@ class SuperSimpleNet(nn.Module):
 
     def get_optimizers(self) -> tuple[Optimizer, LRScheduler]:
         seg_params, dec_params = self.discriminator.get_params()
+        wd = self.config.get("weight_decay", 0.00001)
         optim = AdamW(
             [
                 {
                     "params": self.feature_adaptor.parameters(),
                     "lr": self.config["adapt_lr"],
+                    "weight_decay": wd,
                 },
                 {
                     "params": seg_params,
                     "lr": self.config["seg_lr"],
-                    "weight_decay": 0.00001,
+                    "weight_decay": wd,
                 },
                 {
                     "params": dec_params,
                     "lr": self.config["dec_lr"],
-                    "weight_decay": 0.00001,
+                    "weight_decay": wd,
                 },
             ]
         )
@@ -202,22 +204,29 @@ class Discriminator(nn.Module):
         self.fw = feature_w
         self.fh = feature_h
         self.stop_grad = config.get("stop_grad", False)
+        self.spatial_dropout = config.get("spatial_dropout", 0.0)
+        self.fc_dropout = config.get("fc_dropout", 0.0)
+
+
 
         # 1x1 conv - linear layer equivalent
         self.seg = nn.Sequential(
             nn.Conv2d(
                 in_channels=projection_dim,
                 out_channels=hidden_dim,
-                kernel_size=1,
+                kernel_size=3,
                 stride=1,
+                padding=1,
             ),
             nn.BatchNorm2d(hidden_dim),
             nn.LeakyReLU(0.2, inplace=True),
+            nn.Dropout2d(self.spatial_dropout),
             nn.Conv2d(
                 in_channels=hidden_dim,
                 out_channels=1,
-                kernel_size=1,
+                kernel_size=3,
                 stride=1,
+                padding=1,
                 bias=False,
             ),
         )
@@ -231,6 +240,8 @@ class Discriminator(nn.Module):
 
         self.dec_avg_pool = nn.AdaptiveAvgPool2d(output_size=(1, 1))
         self.dec_max_pool = nn.AdaptiveMaxPool2d(output_size=(1, 1))
+
+        self.dropout_fc = nn.Dropout(p=self.fc_dropout)
 
         self.fc_score = nn.Linear(in_features=128 * 2 + 2, out_features=1)
 
@@ -269,6 +280,7 @@ class Discriminator(nn.Module):
         dec_cat = torch.cat((dec_max, dec_avg, map_max, map_avg), dim=1).squeeze(
             dim=(2, 3)
         )
+        dec_cat = self.dropout_fc(dec_cat)
         score = self.fc_score(dec_cat).squeeze(dim=1)
 
         return map, score
