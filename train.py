@@ -38,7 +38,7 @@ from torchvision.transforms import v2
 import shutil
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.metrics import precision_recall_curve, confusion_matrix
+from sklearn.metrics import roc_curve, confusion_matrix
 
 
 def train(
@@ -55,6 +55,11 @@ def train(
 ):
     model.to(device)
     optimizer, scheduler = model.get_optimizers()
+
+    WEIGHT_AUROC = 0.70
+    WEIGHT_AUPRO = 0.30
+    best_combined_score = -1.0
+    best_model_weights = None
 
     gpu_transforms = v2.Compose([
         v2.Resize(size=config["image_size"], antialias=True),
@@ -184,12 +189,27 @@ def train(
                     pixel_metrics=pixel_metrics,
                     normalize=True
                 )
+
+                current_auroc = results.get("I-AUROC", 0.0)
+                current_aupro = results.get("AUPRO", 0.0)
+
+                combined_score = (current_auroc * WEIGHT_AUROC) + (current_aupro * WEIGHT_AUPRO)
+
+                if combined_score > best_combined_score:
+                    print(f"New best model found! Score: {best_combined_score:.4f} -> {combined_score:.4f}")
+                    print(f"I-AUROC: {current_auroc:.4f} | AUPRO: {current_aupro:.4f}")
+                    best_combined_score = combined_score
+                    best_model_weights = copy.deepcopy(model.state_dict())
                 if LOG_WANDB:
                     wandb.log({**results, **output})
             else:
                 if LOG_WANDB:
                     wandb.log(output)
         scheduler.step()
+    
+    if best_model_weights is not None:
+        model.load_state_dict(best_model_weights)
+        print(f"Training finished! Best model's weights loaded! Best combined score: {best_combined_score:.4f}")
 
     return results
 
@@ -308,54 +328,29 @@ def test(
             results["seg_score"] = (results["seg_score"] - ss_min) / (ss_max - ss_min + 1e-8)
 
         if image_save_path:
-            print("Visualizing")
-            visualizer = Visualizer(image_save_path)
-            visualizer.visualize(results)
-
             print("Generating Confusion Matrix and Separating Images...")
             y_true = results["label"].numpy()
             y_scores = results["score"].numpy()
 
-            precision, recall, thresholds = precision_recall_curve(y_true, y_scores)
-            f1_scores = 2 * (precision * recall) / (precision + recall + 1e-8)
-            best_threshold_idx = np.argmax(f1_scores)
-            best_threshold = thresholds[best_threshold_idx] if best_threshold_idx < len(thresholds) else thresholds[-1]
+            fpr, tpr, thresholds = roc_curve(y_true, y_scores)
+
+            youden_j = tpr - fpr
+
+            best_threshold_idx = np.argmax(youden_j)
+            best_threshold = thresholds[best_threshold_idx]
+
+            print(f"Optimal threshold (Youden): {best_threshold:.4f}")
 
             y_pred = (y_scores >= best_threshold).astype(int)
 
             classification_dir = image_save_path.parent / "classification_results"
             classification_dir.mkdir(exist_ok=True, parents=True)
 
-            cm = confusion_matrix(y_true, y_pred)
-            plt.figure(figsize=(6, 5))
-            sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", 
-                        xticklabels=["Good (0)", "Anomaly (1)"], 
-                        yticklabels=["Good (0)", "Anomaly (1)"])
-            plt.xlabel("Predicted Label")
-            plt.ylabel("True Label")
-            plt.title(f"Confusion Matrix (Threshold: {best_threshold:.3f})")
-            plt.tight_layout()
-            plt.savefig(classification_dir / "confusion_matrix.png")
-            plt.close()
+            print("Visualizing")
+            visualizer = Visualizer(image_save_path)
+            visualizer.visualize(results, y_pred=y_pred, best_threshold=best_threshold)
 
-            for cat in ["TP", "TN", "FP", "FN"]:
-                (classification_dir / cat).mkdir(exist_ok=True, parents=True)
-
-            for img_path_str, true_lbl, pred_lbl in zip(results["image_path"], y_true, y_pred):
-                img_path = Path(img_path_str)
-                
-                if true_lbl == 1 and pred_lbl == 1:
-                    dest_folder = "TP"
-                elif true_lbl == 0 and pred_lbl == 0:
-                    dest_folder = "TN"
-                elif true_lbl == 0 and pred_lbl == 1:
-                    dest_folder = "FP"
-                elif true_lbl == 1 and pred_lbl == 0:
-                    dest_folder = "FN"
-
-                shutil.copy(img_path, classification_dir / dest_folder / img_path.name)
-                
-            print(f"Classification separated in: {classification_dir}")
+            
 
         if score_save_path:
             score_dict = {}
