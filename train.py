@@ -20,6 +20,7 @@ import torch.nn.functional as F
 from pytorch_lightning import LightningDataModule, seed_everything
 
 from torchmetrics.classification import BinaryAveragePrecision, BinaryAUROC
+from sklearn.metrics import precision_score, recall_score, f1_score
 from torchmetrics import Metric
 from anomalib.utils.metrics import AUPRO
 
@@ -39,6 +40,7 @@ import shutil
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.metrics import roc_curve, confusion_matrix
+import argparse
 
 
 def train(
@@ -69,6 +71,20 @@ def train(
     model.train()
     train_loader = datamodule.train_dataloader()
     test_loader = datamodule.test_dataloader()
+
+    print("\n" + "="*40)
+    print("DATASET DEBUG INFO")
+    try:
+        n_normal = len(datamodule.train_data._normal_samples)
+        n_anomalous = len(datamodule.train_data._anomalous_samples)
+        print(f"Normal images loaded: {n_normal}")
+        print(f"Anomalous images loaded: {n_anomalous}")
+        print(f"Total batches per epoch: {len(train_loader)} (Batch size: {config['batch']})")
+        print(f"Total images processed per epoch: {len(train_loader) * config['batch']}")
+    except Exception as e:
+        print(f"Unable to read dataset information directly: {e}")
+    print("="*40 + "\n")
+
     for epoch in range(epochs):
         model.train()
         total_loss = 0
@@ -293,6 +309,7 @@ def test(
         results["image_path"].extend(batch["image_path"])
         results["mask_path"].extend(batch["mask_path"])
 
+    # Base Metrics Calculation
     results_dict = {}
     for name, metric in image_metrics.items():
         results_dict[name] = metric.compute().item()
@@ -306,74 +323,104 @@ def test(
         except RuntimeError:
             results_dict[name] = 0
 
+    # Global Concatenation
+    results["anomaly_map"] = torch.cat(results["anomaly_map"])
+    results["score"] = torch.cat(results["score"])
+    results["seg_score"] = torch.cat(results["seg_score"])
+    results["gt_mask"] = torch.cat(results["gt_mask"])
+    results["label"] = torch.cat(results["label"])
+
+    # Normalization
+    if normalize:
+        am_min, am_max = results["anomaly_map"].min(), results["anomaly_map"].max()
+        results["anomaly_map"] = (results["anomaly_map"] - am_min) / (am_max - am_min + 1e-8)
+
+        s_min, s_max = results["score"].min(), results["score"].max()
+        results["score"] = (results["score"] - s_min) / (s_max - s_min + 1e-8)
+
+        ss_min, ss_max = results["seg_score"].min(), results["seg_score"].max()
+        results["seg_score"] = (results["seg_score"] - ss_min) / (ss_max - ss_min + 1e-8)
+
+    y_true = results["label"].numpy()
+    y_scores = results["score"].numpy()
+
+    fpr, tpr, thresholds = roc_curve(y_true, y_scores)
+    youden_j = tpr - fpr
+    best_threshold_idx = np.argmax(youden_j)
+    best_threshold = thresholds[best_threshold_idx]
+
+    y_pred = (y_scores >= best_threshold).astype(int)
+
+    # Injecting precise metrics evaluated on the optimal threshold
+    results_dict["Precision"] = float(precision_score(y_true, y_pred, zero_division=0))
+    results_dict["Recall"] = float(recall_score(y_true, y_pred, zero_division=0))
+    results_dict["F1-score"] = float(f1_score(y_true, y_pred, zero_division=0))
+
     for name, value in results_dict.items():
-        print(f"{name}: {value} ", end="")
-    print()
+        print(f"{name}: {value:.4f} ", end="")
+    print(f"| Opt-Th: {best_threshold:.4f}")
 
-    if image_save_path or score_save_path:
-        results["anomaly_map"] = torch.cat(results["anomaly_map"])
-        results["score"] = torch.cat(results["score"])
-        results["seg_score"] = torch.cat(results["seg_score"])
-        results["gt_mask"] = torch.cat(results["gt_mask"])
-        results["label"] = torch.cat(results["label"])
+    # Visualization and Storage
+    if image_save_path:
+        print("Saving Confusion Matrix plot and Separating Images...")
+        
+        classification_dir = image_save_path.parent / "classification_results"
+        classification_dir.mkdir(exist_ok=True, parents=True)
 
-        if normalize:
-            am_min, am_max = results["anomaly_map"].min(), results["anomaly_map"].max()
-            results["anomaly_map"] = (results["anomaly_map"] - am_min) / (am_max - am_min + 1e-8)
+        cm = confusion_matrix(y_true, y_pred)
+        plt.figure(figsize=(6, 5))
+        sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", 
+                    xticklabels=["Good (0)", "Anomaly (1)"], 
+                    yticklabels=["Good (0)", "Anomaly (1)"])
+        plt.xlabel("Predicted Label")
+        plt.ylabel("True Label")
+        plt.title(f"Confusion Matrix (Threshold: {best_threshold:.3f})")
+        plt.tight_layout()
+        plt.savefig(classification_dir / "confusion_matrix.png")
+        plt.close()
 
-            s_min, s_max = results["score"].min(), results["score"].max()
-            results["score"] = (results["score"] - s_min) / (s_max - s_min + 1e-8)
+        print("Calculating Optimal Pixel Threshold...")
+        p_true = results["gt_mask"].flatten().numpy()
+        p_scores = results["anomaly_map"].flatten().numpy()
+        
+        # Subsampling [::10] prevents RAM overflow on massive pixel arrays
+        fpr_p, tpr_p, thresholds_p = roc_curve(p_true[::10], p_scores[::10])
+        youden_j_p = tpr_p - fpr_p
+        best_pixel_threshold_idx = np.argmax(youden_j_p)
+        best_pixel_threshold = thresholds_p[best_pixel_threshold_idx]
+        print(f"Optimal Pixel threshold (Youden): {best_pixel_threshold:.4f}")
 
-            ss_min, ss_max = results["seg_score"].min(), results["seg_score"].max()
-            results["seg_score"] = (results["seg_score"] - ss_min) / (ss_max - ss_min + 1e-8)
+        print("Visualizing...")
+        visualizer = Visualizer(classification_dir)
+        visualizer.visualize(
+            results, 
+            y_pred=y_pred, 
+            best_threshold=best_threshold, 
+            best_pixel_threshold=best_pixel_threshold
+        )
 
-        if image_save_path:
-            print("Generating Confusion Matrix and Separating Images...")
-            y_true = results["label"].numpy()
-            y_scores = results["score"].numpy()
+    if score_save_path:
+        score_dict = {}
+        for img_path, score, seg_score, label in zip(
+            results["image_path"],
+            results["score"],
+            results["seg_score"],
+            results["label"],
+        ):
+            img_path = Path(img_path)
+            anomaly_type = img_path.parent.name
+            if anomaly_type not in score_dict:
+                score_dict[anomaly_type] = {"good": {}, "bad": {}}
 
-            fpr, tpr, thresholds = roc_curve(y_true, y_scores)
+            kind = "bad" if label == 1 else "good"
+            score_dict[anomaly_type][kind][img_path.stem] = {
+                "score": score.item(),
+                "seg_score": seg_score.item(),
+            }
 
-            youden_j = tpr - fpr
-
-            best_threshold_idx = np.argmax(youden_j)
-            best_threshold = thresholds[best_threshold_idx]
-
-            print(f"Optimal threshold (Youden): {best_threshold:.4f}")
-
-            y_pred = (y_scores >= best_threshold).astype(int)
-
-            classification_dir = image_save_path.parent / "classification_results"
-            classification_dir.mkdir(exist_ok=True, parents=True)
-
-            print("Visualizing")
-            visualizer = Visualizer(image_save_path)
-            visualizer.visualize(results, y_pred=y_pred, best_threshold=best_threshold)
-
-            
-
-        if score_save_path:
-            score_dict = {}
-            for img_path, score, seg_score, label in zip(
-                results["image_path"],
-                results["score"],
-                results["seg_score"],
-                results["label"],
-            ):
-                img_path = Path(img_path)
-                anomaly_type = img_path.parent.name
-                if anomaly_type not in score_dict:
-                    score_dict[anomaly_type] = {"good": {}, "bad": {}}
-
-                kind = "bad" if label == 1 else "good"
-                score_dict[anomaly_type][kind][img_path.stem] = {
-                    "score": score.item(),
-                    "seg_score": seg_score.item(),
-                }
-
-            score_save_path.mkdir(exist_ok=True, parents=True)
-            with open(score_save_path / "scores.json", "w") as f:
-                json.dump(score_dict, f)
+        score_save_path.mkdir(exist_ok=True, parents=True)
+        with open(score_save_path / "scores.json", "w") as f:
+            json.dump(score_dict, f)
 
     return results_dict
 
@@ -385,7 +432,7 @@ def train_and_eval(model, datamodule, config, device):
 
     image_metrics = {
         "I-AUROC": BinaryAUROC(thresholds=100),
-        "AP-det": BinaryAveragePrecision(thresholds=100),
+        "AP-det": BinaryAveragePrecision(thresholds=100)
     }
     pixel_metrics = {
         "P-AUROC": BinaryAUROC(thresholds=100),
@@ -444,7 +491,7 @@ def train_and_eval(model, datamodule, config, device):
     return results
 
 
-def main_mvtec(device, config):
+def main_mvtec(device, config, supervision=Supervision.UNSUPERVISED):
     config = copy.deepcopy(config)
     config["dataset"] = "mvtec"
     config["ratio"] = 1
@@ -503,6 +550,7 @@ def main_mvtec(device, config):
             eval_batch_size=config["batch"],
             num_workers=config["num_workers"],
             seed=config["seed"],
+            supervision=supervision
         )
         datamodule.setup()
 
@@ -758,7 +806,7 @@ def run_unsup(data_name):
         main_visa(device=device, config=config)
     if data_name == "mvtec":
         config["perlin_thr"] = 0.2
-        main_mvtec(device=device, config=config)
+        main_mvtec(device=device, config=config, supervision=Supervision.UNSUPERVISED)
 
 
 def run_sup(data_name):
@@ -781,9 +829,10 @@ def run_sup(data_name):
         "adapt_cls_feat": True,  # (JIMS extension) cls features are not adapted
         "noise_std": 0.015,
         "perlin_thr": 0.2,
+        "image_size": (512, 512),
         "seed": 456654,
         "batch": 4,
-        "epochs": 100,
+        "epochs": 150,
         "flips": True,
         "seg_lr": 0.0002,
         "dec_lr": 0.0002,
@@ -811,10 +860,39 @@ def run_sup(data_name):
             device=device, config=config, supervision=Supervision.MIXED_SUPERVISION
         )
 
+    if data_name == "mvtec":
+        config["perlin_thr"] = 0.2
+
+        main_mvtec(
+            device=device,
+            config=config,
+            supervision=Supervision.MIXED_SUPERVISION
+        )
 
 def main():
-    run_unsup(sys.argv[1])
-    run_sup(sys.argv[1])
+    parser = argparse.ArgumentParser(description="Train SuperSimpleNet for Thesis Experiments")
+    parser.add_argument(
+        "--dataset", 
+        type=str, 
+        required=True, 
+        help="Name of the dataset to look for (e.g., 'mvtec', 'sensum', 'ksdd2', 'visa')"
+    )
+    parser.add_argument(
+        "--mode", 
+        type=str, 
+        choices=["sup", "unsup"], 
+        required=True, 
+        help="Training setup configuration: 'unsup' for unsupervised baseline, 'sup' for semi-supervised training"
+    )
+    
+    args = parser.parse_args()
+
+    print(f"Starting training pipeline in {args.mode.upper()} mode on dataset: {args.dataset}")
+
+    if args.mode == "unsup":
+        run_unsup(args.dataset)
+    elif args.mode == "sup":
+        run_sup(args.dataset)
 
 
 if __name__ == "__main__":

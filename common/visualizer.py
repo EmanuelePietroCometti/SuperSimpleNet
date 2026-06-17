@@ -7,12 +7,14 @@ from matplotlib import pyplot as plt
 
 from tqdm import tqdm
 
+import torch
+
 
 class Visualizer:
     def __init__(self, save_path: Path):
         self.save_path = save_path
 
-    def visualize(self, results: dict, y_pred: np.ndarray, best_threshold: float):
+    def visualize(self, results: dict, y_pred: np.ndarray, best_threshold: float, best_pixel_threshold: float):
         for image_path, mask_path, anomaly_map, score, seg_score, label, pred_lbl in tqdm(
             zip(
                 results["image_path"],
@@ -34,7 +36,10 @@ class Visualizer:
             else:
                 gt_mask = np.zeros_like(anomaly_map)
             # images are normed to [0, 1] so we cut off at dinamic threshold
-            pred_mask = anomaly_map >= best_threshold
+            pred_mask = anomaly_map >= best_pixel_threshold
+
+            if pred_lbl == 0:
+                pred_mask = torch.zeros_like(pred_mask)
 
             gt_label = "Anomalous" if label.item() else "Normal"
             pred_label_str = "Anomalous" if pred_lbl else "Normal"
@@ -73,7 +78,7 @@ class Visualizer:
 
             plots[4].imshow(anomaly_map, vmax=1, vmin=0)
             plots[4].title.set_text(
-                f"Anomaly map.\nScore: {round(score.item(), 4)}\nSScore: {round(seg_score.item(), 4)}"
+                f"Class. Score: {round(score.item(), 4)}\nPred: {pred_label_str} (I-Th: {best_threshold:.3f})"
             )
 
             # subdir name is parent's name

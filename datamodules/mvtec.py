@@ -19,6 +19,7 @@ class MVTECDataset(SSNDataset):
         transform (A.Compose): transforms used for preprocessing
         split (Split): either train or test split
         debug (bool): debug flag for some debug printing
+        supervision (Supervision): flag to signal the level of supervision for the dataset
     """
 
     def __init__(
@@ -28,6 +29,7 @@ class MVTECDataset(SSNDataset):
         transform: A.Compose,
         split: Split,
         normal_flips: bool = False,
+        supervision: Supervision = Supervision.UNSUPERVISED,
         debug: bool = False,
     ) -> None:
         super().__init__(
@@ -36,7 +38,7 @@ class MVTECDataset(SSNDataset):
             split=split,
             flips=False,
             normal_flips=normal_flips,
-            supervision=Supervision.UNSUPERVISED,
+            supervision=supervision,
             debug=debug,
         )
         self.root_category = Path(root) / Path(category)
@@ -44,33 +46,61 @@ class MVTECDataset(SSNDataset):
     def make_dataset(self) -> tuple[DataFrame, DataFrame]:
         """
         Custom parser to bypass Anomalib's hardcoded MVTec logic.
-        Handles custom datasets with .bmp files and flexible mask naming.
+        Handles custom datasets with .bmp or .png files, flexible mask naming, 
+        and custom ground_truth subfolders (train/test).
         """
         samples_list = []
         # Safely extract the string representation of the split (e.g., "train" or "test")
         split_str = self.split.value if hasattr(self.split, "value") else str(self.split)
         split_dir = self.root_category / split_str
         
-        # Look for all .bmp images in the specified directory
-        for img_path in split_dir.rglob("*.bmp"):
+        # Look for both .bmp and .png images to ensure compatibility
+        valid_extensions = ("*.bmp", "*.png")
+        image_paths = []
+        for ext in valid_extensions:
+            image_paths.extend(list(split_dir.rglob(ext)))
+            
+        for img_path in image_paths:
             label = img_path.parent.name
             mask_path = ""
         
-            # Match masks (ONLY for the anomalous test set)
-            if split_str == "test" and label != "good":
-                mask_dir = self.root_category / "ground_truth" / label
+            # Search for masks if the image is anomalous, regardless of the train/test split
+            if label != "good":
+                # CUSTOM path (yours): ground_truth / train / category
+                mask_dir_custom = self.root_category / "ground_truth" / split_str / label
+                # STANDARD MVTec path: ground_truth / category
+                mask_dir_standard = self.root_category / "ground_truth" / label
                 
-                # Search for the exact .bmp file with the _mask suffix
-                mask_file = mask_dir / f"{img_path.stem}_mask.bmp"
+                # Flexible list of possible mask filenames across both directories
+                possible_masks = [
+                    # Search first in your custom structure
+                    mask_dir_custom / f"{img_path.stem}_mask.bmp",
+                    mask_dir_custom / f"{img_path.stem}_mask.png",
+                    mask_dir_custom / f"{img_path.stem}.bmp",
+                    mask_dir_custom / f"{img_path.stem}.png",
+                    # Fallback to standard MVTec structure (for future compatibility)
+                    mask_dir_standard / f"{img_path.stem}_mask.bmp",
+                    mask_dir_standard / f"{img_path.stem}_mask.png",
+                    mask_dir_standard / f"{img_path.stem}.bmp",
+                    mask_dir_standard / f"{img_path.stem}.png"
+                ]
                 
-                if mask_file.exists():
-                    mask_path = str(mask_file)
-                else:
+                mask_found = False
+                for p_mask in possible_masks:
+                    if p_mask.exists():
+                        mask_path = str(p_mask)
+                        mask_found = True
+                        break
+                        
+                if not mask_found:
                     # Provide explicit feedback if a mask is missing to prevent silent failures
                     raise FileNotFoundError(
-                        f"Mask not found!\n"
+                        f"\n[!] Mask not found!\n"
                         f"Image: {img_path.name}\n"
-                        f"Expected mask: {mask_file}"
+                        f"Searched in:\n"
+                        f"  1. {mask_dir_custom}\n"
+                        f"  2. {mask_dir_standard}\n"
+                        f"Ensure that the mask exists and is named correctly (.bmp or .png)"
                     )
             
             # Construct the row dictionary required by the DataLoader
@@ -84,27 +114,19 @@ class MVTECDataset(SSNDataset):
             })
             
         if not samples_list:
-            raise RuntimeError(f"No .bmp images found in {split_dir}")
+            raise RuntimeError(f"No images found in {split_dir}")
             
-        # Return the DataFrame expected by the datamodule
         samples_df = pd.DataFrame(samples_list)
-        return samples_df, pd.DataFrame()
+        
+        normal_samples = samples_df[samples_df["label_index"] == 0].reset_index(drop=True)
+        anomalous_samples = samples_df[samples_df["label_index"] == 1].reset_index(drop=True)
+        
+        return normal_samples, anomalous_samples
 
 
 class MVTec(SSNDataModule):
     """
     Datamodule for MVTec AD
-
-    Args:
-        root (Path): path to root of dataset
-        category (str): one of 15 categories
-        image_size ( int | tuple[int, int] | None): image size in format of (h, w)
-        normalization (str | InputNormalizationMethod): normalization method for images, defaults to imagenet
-        train_batch_size (int): batch size used in training
-        eval_batch_size (int): batch size used in test / inference
-        num_workers (int): number of dataloader workers. Must be <= 1 for supervised
-        seed (int | None): seed
-        debug (bool): debug flag for some debug printing
     """
 
     def __init__(
@@ -112,20 +134,20 @@ class MVTec(SSNDataModule):
         root: Path | str,
         category: str,
         image_size: tuple[int, int] | None = None,
-        normalization: str
-        | InputNormalizationMethod = InputNormalizationMethod.IMAGENET,
+        normalization: str | InputNormalizationMethod = InputNormalizationMethod.IMAGENET,
         train_batch_size: int = 8,
         eval_batch_size: int = 8,
         num_workers: int = 0,
         seed: int | None = None,
         normal_flips: bool = False,
         debug: bool = False,
+        supervision: Supervision = Supervision.UNSUPERVISED
     ) -> None:
         print(f"Resolution set to: {image_size}")
 
         super().__init__(
             root=root,
-            supervision=Supervision.UNSUPERVISED,
+            supervision=supervision,
             image_size=image_size,
             normalization=normalization,
             train_batch_size=train_batch_size,
@@ -142,6 +164,7 @@ class MVTec(SSNDataModule):
             root=root,
             debug=debug,
             normal_flips=normal_flips,
+            supervision=supervision,
         )
         self.test_data = MVTECDataset(
             category=category,
@@ -149,4 +172,5 @@ class MVTec(SSNDataModule):
             split=Split.TEST,
             root=root,
             debug=debug,
+            supervision=supervision,
         )
