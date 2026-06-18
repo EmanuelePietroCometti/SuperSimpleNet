@@ -229,6 +229,41 @@ def train(
 
     return results
 
+def piecewise_min_max_calibration(scores_tensor: torch.Tensor, threshold: float) -> torch.Tensor:
+    """
+    Calibrates the scores using piecewise min-max normalization.
+    Values below the threshold are linearly scaled to [0, 0.5).
+    Values above the threshold are linearly scaled to [0.5, 1.0].
+    This ensures the optimal decision boundary becomes exactly 0.5.
+    
+    Args:
+        scores_tensor (torch.Tensor): The raw anomaly scores.
+        threshold (float): The optimal threshold calculated via Youden Index.
+        
+    Returns:
+        torch.Tensor: The calibrated scores normalized between 0 and 1.
+    """
+    scores = scores_tensor.clone().float()
+    min_val = scores.min()
+    max_val = scores.max()
+
+    if max_val == min_val:
+        return scores
+
+    calibrated_scores = torch.zeros_like(scores)
+
+    # Scale lower half: [min_val, threshold) -> [0.0, 0.5)
+    lower_mask = scores < threshold
+    if lower_mask.any():
+        calibrated_scores[lower_mask] = 0.5 * ((scores[lower_mask] - min_val) / (threshold - min_val + 1e-8))
+
+    # Scale upper half: [threshold, max_val] -> [0.5, 1.0]
+    upper_mask = scores >= threshold
+    if upper_mask.any():
+        calibrated_scores[upper_mask] = 0.5 + 0.5 * ((scores[upper_mask] - threshold) / (max_val - threshold + 1e-8))
+
+    return calibrated_scores.clip(0, 1)
+
 
 @torch.no_grad()
 def test(
@@ -330,28 +365,38 @@ def test(
     results["gt_mask"] = torch.cat(results["gt_mask"])
     results["label"] = torch.cat(results["label"])
 
-    # Normalization
-    if normalize:
-        am_min, am_max = results["anomaly_map"].min(), results["anomaly_map"].max()
-        results["anomaly_map"] = (results["anomaly_map"] - am_min) / (am_max - am_min + 1e-8)
-
-        s_min, s_max = results["score"].min(), results["score"].max()
-        results["score"] = (results["score"] - s_min) / (s_max - s_min + 1e-8)
-
-        ss_min, ss_max = results["seg_score"].min(), results["seg_score"].max()
-        results["seg_score"] = (results["seg_score"] - ss_min) / (ss_max - ss_min + 1e-8)
-
+    # Calculate RAW Thresholds BEFORE Calibration
     y_true = results["label"].numpy()
-    y_scores = results["score"].numpy()
+    y_scores_raw = results["score"].numpy()
 
-    fpr, tpr, thresholds = roc_curve(y_true, y_scores)
-    youden_j = tpr - fpr
-    best_threshold_idx = np.argmax(youden_j)
-    best_threshold = thresholds[best_threshold_idx]
+    # Calculate optimal threshold for images
+    fpr, tpr, thresholds = roc_curve(y_true, y_scores_raw)
+    raw_img_th = thresholds[np.argmax(tpr - fpr)]
 
-    y_pred = (y_scores >= best_threshold).astype(int)
+    # Calculate optimal threshold for pixels (subsampled to prevent RAM overflow)
+    p_true = results["gt_mask"].flatten().numpy()
+    p_scores_raw = results["anomaly_map"].flatten().numpy()
+    fpr_p, tpr_p, thresholds_p = roc_curve(p_true[::10], p_scores_raw[::10])
+    raw_pix_th = thresholds_p[np.argmax(tpr_p - fpr_p)]
 
-    # Injecting precise metrics evaluated on the optimal threshold
+    # Apply Piecewise Min-Max Calibration
+    if normalize:
+        print("Applying Piecewise Min-Max Calibration (Target TH: 0.5)...")
+        results["score"] = piecewise_min_max_calibration(results["score"], raw_img_th)
+        results["seg_score"] = piecewise_min_max_calibration(results["seg_score"], raw_img_th)
+        results["anomaly_map"] = piecewise_min_max_calibration(results["anomaly_map"], raw_pix_th)
+
+        # After calibration, the optimal thresholds are mathematically forced to 0.5
+        best_threshold = 0.5
+        best_pixel_threshold = 0.5
+    else:
+        best_threshold = raw_img_th
+        best_pixel_threshold = raw_pix_th
+
+    # Calculate Final Metrics using Calibrated Scores
+    y_scores_calibrated = results["score"].numpy()
+    y_pred = (y_scores_calibrated >= best_threshold).astype(int)
+
     results_dict["Precision"] = float(precision_score(y_true, y_pred, zero_division=0))
     results_dict["Recall"] = float(recall_score(y_true, y_pred, zero_division=0))
     results_dict["F1-score"] = float(f1_score(y_true, y_pred, zero_division=0))
@@ -450,6 +495,7 @@ def train_and_eval(model, datamodule, config, device):
         pixel_metrics=pixel_metrics,
         clip_grad=config["clip_grad"],
         eval_step_size=config["eval_step_size"],
+        th=config["th"]
     )
     if LOG_WANDB:
         wandb.finish()
@@ -800,6 +846,7 @@ def run_unsup(data_name):
         "clip_grad": False,
         "eval_step_size": 5,
         "results_save_path": Path("./results"),
+        "th": 2.0
     }
     if data_name == "visa":
         config["perlin_thr"] = 0.6
@@ -842,6 +889,7 @@ def run_sup(data_name):
         "clip_grad": True,
         "eval_step_size": 5,
         "results_save_path": Path("./results"),
+        "th": 0.5
     }
     if data_name == "sensum":
         config["ratio"] = RatioSegmented.M100.value
