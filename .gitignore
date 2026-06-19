@@ -75,3 +75,5 @@ results_backup/
 dataset/
 mvtec/
 __pycache__/
+supersimplenet_tuning.db
+hyperparameter_optimization_img

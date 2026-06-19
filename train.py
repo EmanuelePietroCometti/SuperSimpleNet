@@ -319,7 +319,7 @@ def test(
         seg_score_sig = torch.sigmoid(seg_score)
 
         label_long = batch["label"].to(device, dtype=torch.long, non_blocking=True)
-        mask_long = mask_batch.to(dtype=torch.long)
+        mask_long = (mask_batch >= 0.5).to(dtype=torch.long)
 
         for metric in image_metrics.values():
             metric.update(anomaly_score_sig, label_long)
@@ -375,6 +375,7 @@ def test(
 
     # Calculate optimal threshold for pixels (subsampled to prevent RAM overflow)
     p_true = results["gt_mask"].flatten().numpy()
+    p_true = (p_true >= 0.5).astype(int)
     p_scores_raw = results["anomaly_map"].flatten().numpy()
     fpr_p, tpr_p, thresholds_p = roc_curve(p_true[::10], p_scores_raw[::10])
     raw_pix_th = thresholds_p[np.argmax(tpr_p - fpr_p)]
@@ -426,6 +427,7 @@ def test(
 
         print("Calculating Optimal Pixel Threshold...")
         p_true = results["gt_mask"].flatten().numpy()
+        p_true = (p_true >= 0.5).astype(int)
         p_scores = results["anomaly_map"].flatten().numpy()
         
         # Subsampling [::10] prevents RAM overflow on massive pixel arrays
