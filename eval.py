@@ -588,14 +588,14 @@ def main():
     # DataModule initialization
     if args.dataset == "mvtec":
         datamodule = MVTec(
-            root=config["datasets_folder"] / "mvtec",
+            root=config["datasets_folder"],
             category=config["category"],
             image_size=config["image_size"],
             train_batch_size=config["batch"],
             eval_batch_size=config["batch"],
             num_workers=config["num_workers"],
             seed=config["seed"],
-            supervision=Supervision.MIXED_SUPERVISION # Essential for loading GT masks
+            supervision=Supervision.MIXED_SUPERVISION 
         )
     elif args.dataset == "visa":
          datamodule = Visa(
