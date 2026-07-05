@@ -549,6 +549,7 @@ def parse_args():
     parser.add_argument("--backbone", type=str, default="wide_resnet50_2")
     parser.add_argument("--layers", type=str, nargs="+", default=["layer2", "layer3"])
     parser.add_argument("--patch_size", type=int, default=3)
+    parser.add_argument("--seed", type=int, default=456654, help="Global random seed") 
     
     return parser.parse_args()
 
@@ -573,7 +574,7 @@ def main():
         "backbone": args.backbone,
         "layers": args.layers,
         "patch_size": args.patch_size,
-        "seed": 456654,
+        "seed": args.seed,
         "adapt_cls_feat": True,
     }
 

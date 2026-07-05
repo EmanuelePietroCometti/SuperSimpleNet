@@ -549,26 +549,16 @@ def main_mvtec(device, config, supervision=Supervision.UNSUPERVISED):
     config["dataset"] = "mvtec"
     config["ratio"] = 1
 
-    """"screw",
-        "pill",
-        "capsule",
-        "carpet",
-        "grid",
-        "tile",
-        "wood",
-        "zipper",
-        "cable",
-        "toothbrush",
-        "transistor",
-        "metal_nut",
-        "bottle",
-        "hazelnut",
-        "leather",
-        "carpet","""
+    # Dynamically extract the category from the parsed CLI arguments
+    category = config["category"]
+    print(f"Training on {category}")
 
-    categories = [
-        "reda"
-    ]
+    config["name"] = f"{category}_{config['setup_name']}"
+
+    # Enforce deterministic behavior for reproducibility
+    seed_everything(config["seed"], workers=True)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
     results_writer = ResultsWriter(
         metrics=[
@@ -582,45 +572,35 @@ def main_mvtec(device, config, supervision=Supervision.UNSUPERVISED):
         ]
     )
 
-    for category in categories:
-        print(f"Training on {category}")
+    model = SuperSimpleNet(image_size=config["image_size"], config=config)
 
-        config["category"] = category
-        config["name"] = f"{category}_{config['setup_name']}"
+    datamodule = MVTec(
+        root=Path(config["datasets_folder"]), 
+        category=category,
+        image_size=config["image_size"],
+        train_batch_size=config["batch"],
+        eval_batch_size=config["batch"],
+        num_workers=config["num_workers"],
+        seed=config["seed"],
+        supervision=supervision
+    )
+    datamodule.setup()
 
-        # deterministic
-        seed_everything(config["seed"], workers=True)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
+    results = train_and_eval(
+        model=model, datamodule=datamodule, config=config, device=device
+    )
 
-        model = SuperSimpleNet(image_size=config["image_size"], config=config)
-
-        datamodule = MVTec(
-            root=Path(config["datasets_folder"]) / "mvtec",
-            category=category,
-            image_size=config["image_size"],
-            train_batch_size=config["batch"],
-            eval_batch_size=config["batch"],
-            num_workers=config["num_workers"],
-            seed=config["seed"],
-            supervision=supervision
-        )
-        datamodule.setup()
-
-        results = train_and_eval(
-            model=model, datamodule=datamodule, config=config, device=device
-        )
-
-        results_writer.add_result(
-            category=category,
-            last=results,
-        )
-        results_writer.save(
-            Path(config["results_save_path"])
-            / config["setup_name"]
-            / config["dataset"]
-            / str(config["ratio"])
-        )
+    results_writer.add_result(
+        category=category,
+        last=results,
+    )
+    
+    results_writer.save(
+        Path(config["results_save_path"])
+        / config["setup_name"]
+        / config["dataset"]
+        / str(config["ratio"])
+    )
 
 
 def main_visa(device, config):
