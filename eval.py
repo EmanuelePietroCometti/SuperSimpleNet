@@ -24,6 +24,7 @@ from datamodules.visa import Visa
 from datamodules.ksdd2 import KSDD2
 from datamodules.sensum import Sensum
 from model.supersimplenet import SuperSimpleNet
+import argparse
 
 
 @torch.no_grad()
@@ -528,17 +529,116 @@ def run_eval(datasets, ratios, run_id, res_path):
             )
 
 
-if __name__ == "__main__":
-    datasets = ["mvtec", "visa", "ksdd2", "sensum"]
-    ratios = ["1", "1", "246", "1"]  # set ratios according to the datasets
-    # ratios = ["", "", "", ""]           # for ICPR (also set the adapt_cls_feat to True in config above!!!)
+def parse_args():
+    parser = argparse.ArgumentParser(description="Evaluate SSN on a specific checkpoint")
+    
+    # Positional argument for the weights file (exactly as passed from Colab)
+    parser.add_argument("weights_path", type=str, help="Path to the trained weights file (.pt/.pth)")
+    
+    # Dataset and Paths
+    parser.add_argument("--dataset", type=str, default="mvtec", help="Dataset name")
+    parser.add_argument("--category", type=str, required=True, help="Defect category (e.g., custom_no_dust)")
+    parser.add_argument("--datasets_folder", type=str, required=True, help="Root folder of datasets")
+    parser.add_argument("--data_path", type=str, required=False, help="Alias for datasets_folder")
+    parser.add_argument("--results_save_path", type=str, default="./results", help="Where to save eval outputs")
+    
+    # Architecture and DataLoader
+    parser.add_argument("--image_size", type=int, nargs=2, default=[512, 512])
+    parser.add_argument("--batch", type=int, default=4)
+    parser.add_argument("--num_workers", type=int, default=2)
+    parser.add_argument("--backbone", type=str, default="wide_resnet50_2")
+    parser.add_argument("--layers", type=str, nargs="+", default=["layer2", "layer3"])
+    parser.add_argument("--patch_size", type=int, default=3)
+    
+    return parser.parse_args()
 
-    res_path = Path("./eval_res")
-    run_eval(datasets=datasets, ratios=ratios, run_id=0, res_path=res_path)
-    # to get mean and std of multiple runs, specify them with run_ids
-    generate_result_json(
-        run_ids=["0"],
-        datasets=datasets,
-        ratios=ratios,
-        res_path=res_path,
+def main():
+    args = parse_args()
+    
+    # Variable name compatibility handling
+    if args.data_path and not args.datasets_folder:
+        args.datasets_folder = args.data_path
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    # Configuration dictionary construction
+    config = {
+        "dataset": args.dataset,
+        "category": args.category,
+        "datasets_folder": Path(args.datasets_folder),
+        "results_save_path": Path(args.results_save_path),
+        "image_size": tuple(args.image_size),
+        "batch": args.batch,
+        "num_workers": args.num_workers,
+        "backbone": args.backbone,
+        "layers": args.layers,
+        "patch_size": args.patch_size,
+        "seed": 456654,
+        "adapt_cls_feat": True,
+    }
+
+    print(f"\n--- Starting Evaluation for {args.dataset} - {args.category} ---")
+    print(f"Loading weights from: {args.weights_path}")
+
+    # Model initialization and weights loading
+    model = SuperSimpleNet(image_size=config["image_size"], config=config)
+    model.load_model(Path(args.weights_path))
+
+    # DataModule initialization
+    if args.dataset == "mvtec":
+        datamodule = MVTec(
+            root=config["datasets_folder"] / "mvtec",
+            category=config["category"],
+            image_size=config["image_size"],
+            train_batch_size=config["batch"],
+            eval_batch_size=config["batch"],
+            num_workers=config["num_workers"],
+            seed=config["seed"],
+            supervision=Supervision.MIXED_SUPERVISION # Essential for loading GT masks
+        )
+    elif args.dataset == "visa":
+         datamodule = Visa(
+            root=config["datasets_folder"] / "visa",
+            category=config["category"],
+            image_size=config["image_size"],
+            train_batch_size=config["batch"],
+            eval_batch_size=config["batch"],
+            num_workers=config["num_workers"],
+            seed=config["seed"]
+        )
+    else:
+         raise NotImplementedError(f"Dataset {args.dataset} evaluation not implemented via CLI.")
+         
+    datamodule.setup()
+
+    # Metrics Setup
+    image_metrics = {
+        "I-AUROC": AUROC(),
+        "AP-det": AveragePrecision(num_classes=1),
+    }
+    pixel_metrics = {
+        "P-AUROC": AUROC(),
+        "AP-loc": AveragePrecision(num_classes=1),
+        "AUPRO": AUPRO(),
+    }
+
+    # Definition of save paths for visualizations and scores
+    image_save_path = config["results_save_path"] / "visual_eval" / config["dataset"] / config["category"]
+    score_save_path = config["results_save_path"] / "scores_eval" / config["dataset"] / config["category"]
+
+    # Core Evaluation Start
+    results = eval(
+        model=model,
+        datamodule=datamodule,
+        device=device,
+        image_metrics=image_metrics,
+        pixel_metrics=pixel_metrics,
+        normalize=True,
+        image_save_path=image_save_path,
+        score_save_path=score_save_path
     )
+    
+    print(f"Evaluation completed. Results saved in {args.results_save_path}")
+
+if __name__ == "__main__":
+    main()

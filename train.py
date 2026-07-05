@@ -401,6 +401,11 @@ def test(
     results_dict["Precision"] = float(precision_score(y_true, y_pred, zero_division=0))
     results_dict["Recall"] = float(recall_score(y_true, y_pred, zero_division=0))
     results_dict["F1-score"] = float(f1_score(y_true, y_pred, zero_division=0))
+    
+    p_true_sub = p_true[::10] 
+    p_scores_cal_sub = results["anomaly_map"].flatten().numpy()[::10]
+    p_pred_sub = (p_scores_cal_sub >= best_pixel_threshold).astype(int)
+    results_dict["Pixel-F1"] = float(f1_score(p_true_sub, p_pred_sub, zero_division=0))
 
     for name, value in results_dict.items():
         print(f"{name}: {value:.4f} ", end="")
@@ -816,40 +821,44 @@ def main_sensum(device, config, supervision):
             )
 
 
-def run_unsup(data_name):
+def run_unsup(data_name, args):
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     config = {
-        "wandb_project": "ssn",
-        "datasets_folder": Path("./datasets"),
-        "num_workers": 8,
-        "setup_name": "superSimpleNet",
-        "backbone": "wide_resnet50_2",
-        "layers": ["layer2", "layer3"],
-        "patch_size": 3,
+        "dataset": args.dataset,
+        "category": args.category,
+        "name": f"{args.category}_ssn",
+        "wandb_project": args.wandb_project,
+        "datasets_folder": Path(args.datasets_folder),
+        "num_workers": args.num_workers,
+        "setup_name": args.setup_name,
+        "backbone": args.backbone,
+        "layers": args.layers,
+        "patch_size": args.patch_size,
         "noise": True,
         "perlin": True,
         "no_anomaly": "empty",
         "bad": True,
-        "overlap": True,  # makes no difference, just faster if false to avoid computation
-        "adapt_cls_feat": True,  # (JIMS extension) cls features are not adapted
-        "noise_std": 0.015,
-        "perlin_thr": 0.2,
-        "image_size": (512, 512),
-        "seed": 42,
-        "batch": 4,
-        "epochs": 100,
-        "flips": True,  # makes no difference, just faster if false to avoid computation
-        "seg_lr": 0.0002,
-        "dec_lr": 0.0002,
-        "adapt_lr": 0.0001,
-        "gamma": 0.4,
+        "overlap": True,
+        "adapt_cls_feat": True,
+        "noise_std": args.noise_std,
+        "perlin_thr": args.perlin_thr,
+        "image_size": tuple(args.image_size),
+        "seed": args.seed,
+        "batch": args.batch,
+        "epochs": args.epochs,
+        "flips": True,
+        "seg_lr": args.seg_lr,
+        "dec_lr": args.dec_lr,
+        "adapt_lr": args.adapt_lr,
+        "gamma": args.gamma,
         "stop_grad": True,
         "clip_grad": False,
-        "eval_step_size": 5,
-        "results_save_path": Path("./results"),
-        "th": 2.0
+        "eval_step_size": args.eval_step_size,
+        "results_save_path": Path(args.results_save_path),
+        "th": args.th
     }
+    
     if data_name == "visa":
         config["perlin_thr"] = 0.6
         main_visa(device=device, config=config)
@@ -858,52 +867,56 @@ def run_unsup(data_name):
         main_mvtec(device=device, config=config, supervision=Supervision.UNSUPERVISED)
 
 
-def run_sup(data_name):
+def run_sup(data_name, args):
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    
     config = {
-        "wandb_project": "ssn",
-        "datasets_folder": Path("./datasets"),
-        "num_workers": 1,
-        "setup_name": "superSimpleNet",
-        "dt": (3, 2),   # distance transform
-        "dilate": 7,    # dilate mask
-        "backbone": "wide_resnet50_2",
-        "layers": ["layer2", "layer3"],
-        "patch_size": 3,
+        "dataset": args.dataset,
+        "category": args.category,
+        "name": f"{args.category}_ssn",
+        "wandb_project": args.wandb_project,
+        "datasets_folder": Path(args.datasets_folder),
+        "num_workers": args.num_workers,
+        "setup_name": args.setup_name,
+        "dt": args.dt,
+        "dilate": args.dilate,
+        "backbone": args.backbone,
+        "layers": args.layers,
+        "patch_size": args.patch_size,
         "noise": True,
         "perlin": True,
         "no_anomaly": "empty",
         "bad": True,
         "overlap": False,
-        "adapt_cls_feat": True,  # (JIMS extension) cls features are not adapted
-        "noise_std": 0.015,
-        "perlin_thr": 0.2,
-        "image_size": (512, 512),
-        "seed": 456654,
-        "batch": 4,
-        "epochs": 150,
+        "adapt_cls_feat": True,
+        "noise_std": args.noise_std,
+        "perlin_thr": args.perlin_thr,
+        "image_size": tuple(args.image_size),
+        "seed": args.seed,
+        "batch": args.batch,
+        "epochs": args.epochs,
         "flips": True,
-        "seg_lr": 0.0002,
-        "dec_lr": 0.0002,
-        "adapt_lr": 0.0001,
-        "gamma": 0.4,
+        "seg_lr": args.seg_lr,
+        "dec_lr": args.dec_lr,
+        "adapt_lr": args.adapt_lr,
+        "gamma": args.gamma,
         "stop_grad": False,
         "clip_grad": True,
-        "eval_step_size": 5,
-        "results_save_path": Path("./results"),
-        "th": 0.5
+        "eval_step_size": args.eval_step_size,
+        "results_save_path": Path(args.results_save_path),
+        "th": args.th
     }
+    
     if data_name == "sensum":
         config["ratio"] = RatioSegmented.M100.value
-
         if float(config["ratio"]) == 0:
             config["perlin_thr"] = 0.2
         main_sensum(
             device=device, config=config, supervision=Supervision.MIXED_SUPERVISION
         )
+        
     if data_name == "ksdd2":
         config["ratio"] = NumSegmented.N246.value
-
         if float(config["ratio"]) == 0:
             config["perlin_thr"] = 0.2
         main_ksdd2(
@@ -912,38 +925,67 @@ def run_sup(data_name):
 
     if data_name == "mvtec":
         config["perlin_thr"] = 0.2
-
         main_mvtec(
             device=device,
             config=config,
             supervision=Supervision.MIXED_SUPERVISION
         )
 
-def main():
-    parser = argparse.ArgumentParser(description="Train SuperSimpleNet for Thesis Experiments")
-    parser.add_argument(
-        "--dataset", 
-        type=str, 
-        required=True, 
-        help="Name of the dataset to look for (e.g., 'mvtec', 'sensum', 'ksdd2', 'visa')"
-    )
-    parser.add_argument(
-        "--mode", 
-        type=str, 
-        choices=["sup", "unsup"], 
-        required=True, 
-        help="Training setup configuration: 'unsup' for unsupervised baseline, 'sup' for semi-supervised training"
-    )
+
+def get_args_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Configuration Parser for SSN")
     
+    # Argomenti Base (Mancanti prima)
+    parser.add_argument("--dataset", type=str, default="mvtec", help="Dataset type")
+    parser.add_argument("--category", type=str, required=True, help="Category of the dataset")
+    parser.add_argument("--mode", type=str, default="sup", help="Supervision paradigm")
+    
+    # Compatibilità percorsi (Risolve il crash con Colab)
+    parser.add_argument("--datasets_folder", type=str, required=True, help="Path to the datasets directory")
+    parser.add_argument("--data_path", type=str, required=False, help="Alias for datasets_folder")
+    
+    parser.add_argument("--wandb_project", type=str, default="ssn", help="Name of the Weights & Biases project")
+    parser.add_argument("--num_workers", type=int, default=4, help="Number of background workers for the DataLoader")
+    parser.add_argument("--setup_name", type=str, required=True, help="Name of the current experimental setup")
+    parser.add_argument("--results_save_path", type=str, default="./results", help="Directory path where results will be saved")
+    
+    parser.add_argument("--dt", type=int, nargs=2, default=[3, 2], help="Distance transform parameters")
+    parser.add_argument("--dilate", type=int, default=7, help="Dilation factor for the mask")
+    parser.add_argument("--image_size", type=int, nargs=2, default=[512, 512], help="Image resolution")
+    parser.add_argument("--noise_std", type=float, default=0.015, help="Standard deviation for the applied noise")
+    parser.add_argument("--perlin_thr", type=float, default=0.2, help="Threshold for Perlin noise generation")
+    
+    parser.add_argument("--backbone", type=str, default="wide_resnet50_2", help="Backbone architecture")
+    parser.add_argument("--layers", type=str, nargs="+", default=["layer2", "layer3"], help="List of backbone layers")
+    parser.add_argument("--patch_size", type=int, default=3, help="Patch size applied in the processing step")
+    
+    parser.add_argument("--seed", type=int, default=456654, help="Global random seed")
+    parser.add_argument("--batch", type=int, default=4, help="Batch size")
+    parser.add_argument("--epochs", type=int, default=150, help="Total number of training epochs")
+    
+    parser.add_argument("--seg_lr", type=float, default=0.0002, help="Learning rate for the segmentation module")
+    parser.add_argument("--dec_lr", type=float, default=0.0002, help="Learning rate for the decoder module")
+    parser.add_argument("--adapt_lr", type=float, default=0.0001, help="Learning rate for the adaptation module")
+    
+    parser.add_argument("--gamma", type=float, default=0.4, help="Gamma decay parameter")
+    parser.add_argument("--eval_step_size", type=int, default=5, help="Number of steps/epochs between evaluations")
+    parser.add_argument("--th", type=float, default=0.5, help="Threshold applied for binary classification/segmentation")
+    
+    return parser
+
+def main():
+    parser = get_args_parser()
     args = parser.parse_args()
+
+    if hasattr(args, 'data_path') and args.data_path and not args.datasets_folder:
+        args.datasets_folder = args.data_path
 
     print(f"Starting training pipeline in {args.mode.upper()} mode on dataset: {args.dataset}")
 
     if args.mode == "unsup":
-        run_unsup(args.dataset)
+        run_unsup(args.dataset, args)
     elif args.mode == "sup":
-        run_sup(args.dataset)
-
+        run_sup(args.dataset, args)
 
 if __name__ == "__main__":
     main()
