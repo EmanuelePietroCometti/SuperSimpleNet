@@ -136,10 +136,32 @@ def eval(
     print()
 
     if image_save_path:
-        # Use the existing visualizer for anomaly maps
         print("Visualizing Anomaly Maps...")
+        from sklearn.metrics import roc_curve
+        import numpy as np
+
+        # Calculate optimal threshold for images
+        y_true = results["label"].numpy()
+        y_scores = results["score"].numpy()
+        fpr, tpr, thresholds = roc_curve(y_true, y_scores)
+        best_threshold = thresholds[np.argmax(tpr - fpr)]
+        y_pred = (y_scores >= best_threshold).astype(int)
+
+        # Calculate optimal threshold for pixels (subsampled)
+        p_true = results["gt_mask"].flatten().numpy()
+        p_true = (p_true >= 0.5).astype(int)
+        p_scores = results["anomaly_map"].flatten().numpy()
+        fpr_p, tpr_p, thresholds_p = roc_curve(p_true[::10], p_scores[::10])
+        best_pixel_threshold = thresholds_p[np.argmax(tpr_p - fpr_p)]
+
+        # Call visualizer with the new required arguments
         visualizer = Visualizer(image_save_path)
-        visualizer.visualize(results)
+        visualizer.visualize(
+            results,
+            y_pred=y_pred,
+            best_threshold=best_threshold,
+            best_pixel_threshold=best_pixel_threshold
+        )
 
     score_dict = {}
     if score_save_path:
