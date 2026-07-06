@@ -7,6 +7,8 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np
 from sklearn.metrics import precision_recall_curve, confusion_matrix
+from sklearn.metrics import roc_curve, precision_score, recall_score, f1_score
+import numpy as np
 
 import torch
 from anomalib.utils.metrics import AUROC, AUPRO
@@ -41,13 +43,11 @@ def eval(
     model.to(device)
     model.eval()
 
-    # for anomaly map max as image score
+    # Create deep copies for segmentation image metrics (Anomaly map max as image score)
     seg_image_metrics = {}
-
     for m_name, metric in image_metrics.items():
         metric.cpu()
         metric.reset()
-
         seg_image_metrics[f"seg-{m_name}"] = copy.deepcopy(metric)
 
     for metric in pixel_metrics.values():
@@ -64,6 +64,7 @@ def eval(
         "image_path": [],
         "mask_path": [],
     }
+    
     for batch in tqdm(test_loader, position=0, leave=True):
         image_batch = batch["image"].to(device)
         anomaly_map, anomaly_score = model.forward(image_batch)
@@ -83,13 +84,14 @@ def eval(
         results["image_path"].extend(batch["image_path"])
         results["mask_path"].extend(batch["mask_path"])
 
+    # Global concatenation
     results["anomaly_map"] = torch.cat(results["anomaly_map"])
     results["score"] = torch.cat(results["score"])
     results["seg_score"] = torch.cat(results["seg_score"])
     results["gt_mask"] = torch.cat(results["gt_mask"])
     results["label"] = torch.cat(results["label"])
 
-    # normalize
+    # Normalization phase
     if normalize:
         results["anomaly_map"] = (
             results["anomaly_map"] - results["anomaly_map"].flatten().min()
@@ -104,6 +106,7 @@ def eval(
             results["seg_score"].max() - results["seg_score"].min()
         )
 
+    # Base Metrics Calculation (AUROC, AUPRO, AP)
     results_dict = {}
     for name, metric in image_metrics.items():
         metric.update(results["score"], results["label"])
@@ -131,30 +134,43 @@ def eval(
             results_dict[name] = 0
         metric.to("cpu")
 
-    for name, value in results_dict.items():
-        print(f"{name}: {value} ", end="")
-    print()
+    # ==========================================
+    # --- NEW METRICS COMPUTATION AND EXPORT ---
+    # ==========================================
 
+    # alculate optimal threshold and metrics for images
+    y_true = results["label"].numpy()
+    y_scores = results["score"].numpy()
+    fpr, tpr, thresholds = roc_curve(y_true, y_scores)
+    best_threshold = thresholds[np.argmax(tpr - fpr)]
+    y_pred = (y_scores >= best_threshold).astype(int)
+
+    results_dict["Precision"] = float(precision_score(y_true, y_pred, zero_division=0))
+    results_dict["Recall"] = float(recall_score(y_true, y_pred, zero_division=0))
+    results_dict["F1-score"] = float(f1_score(y_true, y_pred, zero_division=0))
+
+    # Calculate optimal threshold and metrics for pixels (subsampled to prevent RAM overflow)
+    p_true = results["gt_mask"].flatten().numpy()
+    p_true = (p_true >= 0.5).astype(int)
+    p_scores = results["anomaly_map"].flatten().numpy()
+    fpr_p, tpr_p, thresholds_p = roc_curve(p_true[::10], p_scores[::10])
+    best_pixel_threshold = thresholds_p[np.argmax(tpr_p - fpr_p)]
+    
+    p_pred_sub = (p_scores[::10] >= best_pixel_threshold).astype(int)
+    results_dict["Pixel-F1"] = float(f1_score(p_true[::10], p_pred_sub, zero_division=0))
+
+    # Print results to screen
+    print("\n--- EVALUATION RESULTS ---")
+    for name, value in results_dict.items():
+        if isinstance(value, float):
+            print(f"{name}: {value:.4f} ", end="")
+        else:
+            print(f"{name}: {value} ", end="")
+    print(f"| Opt-Th: {best_threshold:.4f}\n")
+
+    # Save Visualizations
     if image_save_path:
         print("Visualizing Anomaly Maps...")
-        from sklearn.metrics import roc_curve
-        import numpy as np
-
-        # Calculate optimal threshold for images
-        y_true = results["label"].numpy()
-        y_scores = results["score"].numpy()
-        fpr, tpr, thresholds = roc_curve(y_true, y_scores)
-        best_threshold = thresholds[np.argmax(tpr - fpr)]
-        y_pred = (y_scores >= best_threshold).astype(int)
-
-        # Calculate optimal threshold for pixels (subsampled)
-        p_true = results["gt_mask"].flatten().numpy()
-        p_true = (p_true >= 0.5).astype(int)
-        p_scores = results["anomaly_map"].flatten().numpy()
-        fpr_p, tpr_p, thresholds_p = roc_curve(p_true[::10], p_scores[::10])
-        best_pixel_threshold = thresholds_p[np.argmax(tpr_p - fpr_p)]
-
-        # Call visualizer with the new required arguments
         visualizer = Visualizer(image_save_path)
         visualizer.visualize(
             results,
@@ -163,9 +179,9 @@ def eval(
             best_pixel_threshold=best_pixel_threshold
         )
 
+    # Save Scores and Metrics to JSON
     score_dict = {}
     if score_save_path:
-        # save both segscore and score to json
         for img_path, score, seg_score, label in zip(
             results["image_path"],
             results["score"],
@@ -173,25 +189,25 @@ def eval(
             results["label"],
         ):
             img_path = Path(img_path)
-
             anomaly_type = img_path.parent.name
             if anomaly_type not in score_dict:
                 score_dict[anomaly_type] = {"good": {}, "bad": {}}
 
-            # since some datasets (sensum) can have same names in bad and good
-            if label == 1:
-                kind = "bad"
-            else:
-                kind = "good"
-
+            kind = "bad" if label == 1 else "good"
             score_dict[anomaly_type][kind][img_path.stem] = {
                 "score": score.item(),
                 "seg_score": seg_score.item(),
             }
 
         score_save_path.mkdir(exist_ok=True, parents=True)
+        
+        # Save per-image scores
         with open(score_save_path / "scores.json", "w") as f:
             json.dump(score_dict, f)
+            
+        # Save global evaluation metrics
+        with open(score_save_path / "metrics.json", "w") as f:
+            json.dump(results_dict, f, indent=4)
 
     return results_dict
 

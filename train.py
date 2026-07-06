@@ -474,6 +474,9 @@ def test(
         with open(score_save_path / "scores.json", "w") as f:
             json.dump(score_dict, f)
 
+        with open(score_save_path / "metrics.json", "w") as f:
+            json.dump(results_dict, f, indent=4)
+
     return results_dict
 
 
