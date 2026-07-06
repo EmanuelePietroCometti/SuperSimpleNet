@@ -118,6 +118,7 @@ def eval(
         results_dict[name] = metric.to(device).compute().item()
         metric.to("cpu")
 
+    binary_gt_mask = (results["gt_mask"] >= 0.5).type(torch.long)
     for name, metric in pixel_metrics.items():
         am = results["anomaly_map"]
         am[am != am] = 0
@@ -128,7 +129,7 @@ def eval(
             # Consistently pass tensors to GPU
             metric.update(
                 am.to(device), 
-                results["gt_mask"].type(torch.float32).to(device)
+                binary_gt_mask.to(device)
             )
             results_dict[name] = metric.compute().item()
         except Exception as e:
