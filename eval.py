@@ -119,20 +119,24 @@ def eval(
         metric.to("cpu")
 
     for name, metric in pixel_metrics.items():
-        try:
-            # avoid nan in early stages
-            am = results["anomaly_map"]
-            am[am != am] = 0
-            results["anomaly_map"] = am
+        am = results["anomaly_map"]
+        am[am != am] = 0
 
+        # Move metric to GPU BEFORE the update
+        metric.to(device)
+        try:
+            # Consistently pass tensors to GPU
             metric.update(
-                results["anomaly_map"], results["gt_mask"].type(torch.float32)
+                am.to(device), 
+                results["gt_mask"].type(torch.float32).to(device)
             )
-            results_dict[name] = metric.to(device).compute().item()
-        except RuntimeError:
-            # AUPRO in some cases with early predictions crashes cuda, so just skip it in that case
+            results_dict[name] = metric.compute().item()
+        except Exception as e:
+            print(f"\n[!] Error during {name} computation: {e}")
             results_dict[name] = 0
-        metric.to("cpu")
+        finally:
+            # Free up VRAM by moving the metric back to CPU
+            metric.to("cpu")
 
     # ==========================================
     # --- NEW METRICS COMPUTATION AND EXPORT ---
