@@ -93,18 +93,28 @@ def eval(
 
     # Normalization phase
     if normalize:
+        # Epsilon to prevent division by zero and subsequent NaN generation
+        eps = 1e-8
+        
         results["anomaly_map"] = (
             results["anomaly_map"] - results["anomaly_map"].flatten().min()
         ) / (
             results["anomaly_map"].flatten().max()
-            - results["anomaly_map"].flatten().min()
+            - results["anomaly_map"].flatten().min() + eps
         )
+        
         results["score"] = (results["score"] - results["score"].min()) / (
-            results["score"].max() - results["score"].min()
+            results["score"].max() - results["score"].min() + eps
         )
+        
         results["seg_score"] = (results["seg_score"] - results["seg_score"].min()) / (
-            results["seg_score"].max() - results["seg_score"].min()
+            results["seg_score"].max() - results["seg_score"].min() + eps
         )
+
+        # Defensively convert any residual NaN to 0.0
+        results["anomaly_map"] = torch.nan_to_num(results["anomaly_map"], nan=0.0)
+        results["score"] = torch.nan_to_num(results["score"], nan=0.0)
+        results["seg_score"] = torch.nan_to_num(results["seg_score"], nan=0.0)
 
     # Base Metrics Calculation (AUROC, AUPRO, AP)
     results_dict = {}
