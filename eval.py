@@ -28,7 +28,6 @@ from datamodules.sensum import Sensum
 from model.supersimplenet import SuperSimpleNet
 import argparse
 
-
 @torch.no_grad()
 def eval(
     model: SuperSimpleNet,
@@ -42,17 +41,6 @@ def eval(
 ):
     model.to(device)
     model.eval()
-
-    # Create deep copies for segmentation image metrics (Anomaly map max as image score)
-    seg_image_metrics = {}
-    for m_name, metric in image_metrics.items():
-        metric.cpu()
-        metric.reset()
-        seg_image_metrics[f"seg-{m_name}"] = copy.deepcopy(metric)
-
-    for metric in pixel_metrics.values():
-        metric.cpu()
-        metric.reset()
 
     test_loader = datamodule.test_dataloader()
     results = {
@@ -72,7 +60,7 @@ def eval(
         anomaly_map = anomaly_map.detach().cpu()
         anomaly_score = anomaly_score.detach().cpu()
 
-        results["anomaly_map"].append(anomaly_map.detach().cpu())
+        results["anomaly_map"].append(anomaly_map)
         results["gt_mask"].append(batch["mask"].detach().cpu())
 
         results["score"].append(torch.sigmoid(anomaly_score))
@@ -91,90 +79,73 @@ def eval(
     results["gt_mask"] = torch.cat(results["gt_mask"])
     results["label"] = torch.cat(results["label"])
 
-    # Normalization phase
-    if normalize:
-        # Epsilon to prevent division by zero and subsequent NaN generation
-        eps = 1e-8
-        
-        results["anomaly_map"] = (
-            results["anomaly_map"] - results["anomaly_map"].flatten().min()
-        ) / (
-            results["anomaly_map"].flatten().max()
-            - results["anomaly_map"].flatten().min() + eps
-        )
-        
-        results["score"] = (results["score"] - results["score"].min()) / (
-            results["score"].max() - results["score"].min() + eps
-        )
-        
-        results["seg_score"] = (results["seg_score"] - results["seg_score"].min()) / (
-            results["seg_score"].max() - results["seg_score"].min() + eps
-        )
-
-        # Defensively convert any residual NaN to 0.0
-        results["anomaly_map"] = torch.nan_to_num(results["anomaly_map"], nan=0.0)
-        results["score"] = torch.nan_to_num(results["score"], nan=0.0)
-        results["seg_score"] = torch.nan_to_num(results["seg_score"], nan=0.0)
-
-    # Base Metrics Calculation (AUROC, AUPRO, AP)
+    # 1. Clean NaNs to safeguard the raw metrics
+    am_raw = torch.nan_to_num(results["anomaly_map"], nan=0.0)
+    score_raw = torch.nan_to_num(results["score"], nan=0.0)
+    seg_score_raw = torch.nan_to_num(results["seg_score"], nan=0.0)
+    
     results_dict = {}
-    for name, metric in image_metrics.items():
-        metric.update(results["score"], results["label"])
-        results_dict[name] = metric.to(device).compute().item()
-        metric.to("cpu")
-
-    for name, metric in seg_image_metrics.items():
-        metric.update(results["seg_score"], results["label"])
-        results_dict[name] = metric.to(device).compute().item()
-        metric.to("cpu")
-
-    binary_gt_mask = (results["gt_mask"] >= 0.5).type(torch.long)
-    for name, metric in pixel_metrics.items():
-        am = results["anomaly_map"]
-        am[am != am] = 0
-
-        # Move metric to GPU BEFORE the update
-        metric.to(device)
-        try:
-            # Consistently pass tensors to GPU
-            metric.update(
-                am.to(device), 
-                binary_gt_mask.to(device)
-            )
-            results_dict[name] = metric.compute().item()
-        except Exception as e:
-            print(f"\n[!] Error during {name} computation: {e}")
-            results_dict[name] = 0
-        finally:
-            # Free up VRAM by moving the metric back to CPU
-            metric.to("cpu")
 
     # ==========================================
-    # --- NEW METRICS COMPUTATION AND EXPORT ---
+    # --- SKLEARN RAW METRICS COMPUTATION ---
     # ==========================================
+    from sklearn.metrics import roc_curve, roc_auc_score, precision_score, recall_score, f1_score, average_precision_score
+    import numpy as np
 
-    # alculate optimal threshold and metrics for images
     y_true = results["label"].numpy()
-    y_scores = results["score"].numpy()
+    y_scores = score_raw.numpy()
+    seg_scores = seg_score_raw.numpy()
+
+    # Image-level Metrics
+    results_dict["I-AUROC"] = float(roc_auc_score(y_true, y_scores))
+    results_dict["AP-det"] = float(average_precision_score(y_true, y_scores))
+    results_dict["seg-I-AUROC"] = float(roc_auc_score(y_true, seg_scores))
+    results_dict["seg-AP-det"] = float(average_precision_score(y_true, seg_scores))
+
     fpr, tpr, thresholds = roc_curve(y_true, y_scores)
-    best_threshold = thresholds[np.argmax(tpr - fpr)]
+    best_threshold = float(thresholds[np.argmax(tpr - fpr)])
     y_pred = (y_scores >= best_threshold).astype(int)
 
     results_dict["Precision"] = float(precision_score(y_true, y_pred, zero_division=0))
     results_dict["Recall"] = float(recall_score(y_true, y_pred, zero_division=0))
     results_dict["F1-score"] = float(f1_score(y_true, y_pred, zero_division=0))
 
-    # Calculate optimal threshold and metrics for pixels (subsampled to prevent RAM overflow)
+    # Pixel-level Metrics (Subsampled by 10 to prevent system RAM overflow)
     p_true = results["gt_mask"].flatten().numpy()
     p_true = (p_true >= 0.5).astype(int)
-    p_scores = results["anomaly_map"].flatten().numpy()
-    fpr_p, tpr_p, thresholds_p = roc_curve(p_true[::10], p_scores[::10])
-    best_pixel_threshold = thresholds_p[np.argmax(tpr_p - fpr_p)]
-    
-    p_pred_sub = (p_scores[::10] >= best_pixel_threshold).astype(int)
-    results_dict["Pixel-F1"] = float(f1_score(p_true[::10], p_pred_sub, zero_division=0))
+    p_scores = am_raw.flatten().numpy()
 
-    # Print results to screen
+    step = 10 
+    p_true_sub = p_true[::step]
+    p_scores_sub = p_scores[::step]
+
+    results_dict["P-AUROC"] = float(roc_auc_score(p_true_sub, p_scores_sub))
+    results_dict["AP-loc"] = float(average_precision_score(p_true_sub, p_scores_sub))
+
+    fpr_p, tpr_p, thresholds_p = roc_curve(p_true_sub, p_scores_sub)
+    best_pixel_threshold = float(thresholds_p[np.argmax(tpr_p - fpr_p)])
+    p_pred_sub = (p_scores_sub >= best_pixel_threshold).astype(int)
+
+    results_dict["Pixel-F1"] = float(f1_score(p_true_sub, p_pred_sub, zero_division=0))
+
+    # AUPRO (Requires spatial structure, utilizing TorchMetrics on GPU)
+    if "AUPRO" in pixel_metrics:
+        metric = pixel_metrics["AUPRO"]
+        metric.to(device)
+        try:
+            # Enforce strictly binary masks for TorchMetrics validation
+            binary_mask = (results["gt_mask"] >= 0.5).type(torch.long).to(device)
+            metric.update(am_raw.to(device), binary_mask)
+            results_dict["AUPRO"] = metric.compute().item()
+        except Exception as e:
+            print(f"\n[!] Error computing AUPRO: {e}")
+            results_dict["AUPRO"] = 0.0
+        finally:
+            metric.to("cpu")
+
+    # ==========================================
+    # --- LOGGING & EXPORT ---
+    # ==========================================
     print("\n--- EVALUATION RESULTS ---")
     for name, value in results_dict.items():
         if isinstance(value, float):
@@ -183,24 +154,30 @@ def eval(
             print(f"{name}: {value} ", end="")
     print(f"| Opt-Th: {best_threshold:.4f}\n")
 
-    # Save Visualizations
     if image_save_path:
         print("Visualizing Anomaly Maps...")
+        # Normalization applied ONLY for image generation/visualizer
+        eps = 1e-8
+        vis_anomaly_map = (am_raw - am_raw.flatten().min()) / (am_raw.flatten().max() - am_raw.flatten().min() + eps)
+        
+        vis_results = results.copy()
+        vis_results["anomaly_map"] = vis_anomaly_map
+        
         visualizer = Visualizer(image_save_path)
         visualizer.visualize(
-            results,
+            vis_results,
             y_pred=y_pred,
             best_threshold=best_threshold,
             best_pixel_threshold=best_pixel_threshold
         )
 
-    # Save Scores and Metrics to JSON
+    # JSON Export
     score_dict = {}
     if score_save_path:
         for img_path, score, seg_score, label in zip(
             results["image_path"],
-            results["score"],
-            results["seg_score"],
+            score_raw,
+            seg_score_raw,
             results["label"],
         ):
             img_path = Path(img_path)
@@ -215,12 +192,8 @@ def eval(
             }
 
         score_save_path.mkdir(exist_ok=True, parents=True)
-        
-        # Save per-image scores
         with open(score_save_path / "scores.json", "w") as f:
             json.dump(score_dict, f)
-            
-        # Save global evaluation metrics
         with open(score_save_path / "metrics.json", "w") as f:
             json.dump(results_dict, f, indent=4)
 
