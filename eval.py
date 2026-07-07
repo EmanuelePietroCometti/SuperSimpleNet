@@ -11,7 +11,8 @@ from sklearn.metrics import roc_curve, precision_score, recall_score, f1_score, 
 import numpy as np
 
 import torch
-from anomalib.utils.metrics import BinaryAUROC,  BinaryAveragePrecision, AUPRO
+from torchmetrics.classification import BinaryAUROC, BinaryAveragePrecision
+from anomalib.utils.metrics import AUPRO
 from torchmetrics import Metric, AveragePrecision
 from pytorch_lightning import LightningDataModule
 from tqdm import tqdm
