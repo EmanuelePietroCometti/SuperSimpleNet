@@ -94,6 +94,7 @@ class Visualizer:
             ano_maps_dir = total_path / "anomaly_maps"
             ano_maps_dir.mkdir(exist_ok=True, parents=True)
 
-            cv2.imwrite(str(ano_maps_dir / plot_name), anomaly_map.numpy() * 255)
+            anomaly_map_uint8 = np.clip(anomaly_map.numpy() * 255, 0, 255).astype(np.uint8)
+            cv2.imwrite(str(ano_maps_dir / plot_name), anomaly_map_uint8)
 
             plt.close("all")
