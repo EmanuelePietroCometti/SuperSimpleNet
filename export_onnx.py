@@ -7,12 +7,6 @@ from torch.export import Dim
 
 from model.supersimplenet import SuperSimpleNet
 
-import onnx
-from onnxconverter_common import float16
-from onnxruntime.transformers.onnx_model import OnnxModel
-import numpy as np
-from onnxruntime.quantization import CalibrationDataReader, quantize_static, QuantType, QuantFormat
-
 # ImageNet stats used by the train/eval preprocessing pipelines
 # (see train.py / eval.py gpu_transforms) - baked into the graph below.
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
@@ -42,6 +36,46 @@ class StaticGaussianBlur(torch.nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return F.conv2d(x, self.weight, padding=self.padding)
+
+
+# ==========================================
+# --- PATCH BATCH NORM ---
+# ==========================================
+class StaticBatchNorm2d(torch.nn.Module):
+    """
+    Static affine replacement for a frozen (eval-mode) nn.BatchNorm2d.
+
+    torch's dynamo-based ONNX exporter (torch 2.8, and other recent versions)
+    has a bug translating aten::_native_batch_norm_legit_no_training - the op
+    used for BatchNorm2d.forward() in eval mode - crashing with
+    "AttributeError: 'tuple' object has no attribute 'dtype'". Every BN in
+    this graph (both the pretrained backbone's and the discriminator's) runs
+    in eval mode with frozen running stats, so it is mathematically just
+    y = x * scale + shift with scale/shift precomputed from
+    (weight, bias, running_mean, running_var, eps); folding it ahead of time
+    sidesteps the buggy op entirely and is exact (not an approximation).
+    """
+    def __init__(self, bn: torch.nn.BatchNorm2d):
+        super().__init__()
+        with torch.no_grad():
+            scale = bn.weight / torch.sqrt(bn.running_var + bn.eps)
+            shift = bn.bias - bn.running_mean * scale
+        self.register_buffer("scale", scale.view(1, -1, 1, 1))
+        self.register_buffer("shift", shift.view(1, -1, 1, 1))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x * self.scale + self.shift
+
+
+def patch_batch_norm(model):
+    """Recursively replaces every nn.BatchNorm2d (backbone + discriminator) with
+    its static affine equivalent. Must run after model.eval() so running_mean/
+    running_var reflect the final trained statistics."""
+    for child_name, child in model.named_children():
+        if isinstance(child, torch.nn.BatchNorm2d):
+            setattr(model, child_name, StaticBatchNorm2d(child))
+        else:
+            patch_batch_norm(child)
 
 
 # ==========================================
@@ -105,10 +139,10 @@ class InferenceWrapper(torch.nn.Module):
         self.model = model
         self.image_size = image_size
         self.register_buffer(
-            "mean", torch.tensor(IMAGENET_MEAN).view(1, 3, 1, 1), persistent=False
+            "image_mean", torch.tensor(IMAGENET_MEAN).view(1, 3, 1, 1), persistent=False
         )
         self.register_buffer(
-            "std", torch.tensor(IMAGENET_STD).view(1, 3, 1, 1), persistent=False
+            "image_std", torch.tensor(IMAGENET_STD).view(1, 3, 1, 1), persistent=False
         )
 
     def forward(self, image: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -118,7 +152,7 @@ class InferenceWrapper(torch.nn.Module):
         x = F.interpolate(
             x, size=self.image_size, mode="bilinear", align_corners=False, antialias=True
         )
-        x = (x - self.mean) / self.std
+        x = (x - self.image_mean) / self.image_std
 
         anomaly_map, anomaly_score = self.model(x)
         anomaly_score = torch.sigmoid(anomaly_score)
@@ -131,6 +165,10 @@ def build_wrapper(weights_path: Path, config: dict, device: str) -> InferenceWra
     model.load_model(weights_path)
     model.to(device)
     model.eval()
+
+    # Patch BatchNorm2d (backbone + discriminator) to a static affine op -
+    # works around a torch.onnx dynamo exporter bug (see StaticBatchNorm2d).
+    patch_batch_norm(model)
 
     # Patch Gaussian Blur (data-dependent control flow -> static conv)
     if hasattr(model, 'anomaly_map_generator') and hasattr(model.anomaly_map_generator, 'blur'):
@@ -150,7 +188,14 @@ def build_wrapper(weights_path: Path, config: dict, device: str) -> InferenceWra
     return wrapper
 
 
-def export_fp32(wrapper: InferenceWrapper, image_size: tuple[int, int], onnx_path: Path, device: str):
+def export_fp32(
+    wrapper: InferenceWrapper,
+    image_size: tuple[int, int],
+    onnx_path: Path,
+    device: str,
+    batch_min: int = 1,
+    batch_max: int = 64,
+):
     h, w = image_size
 
     # NOTE: the dummy batch dim must be > 1 (torch.export "0/1 specialization"):
@@ -158,7 +203,13 @@ def export_fp32(wrapper: InferenceWrapper, image_size: tuple[int, int], onnx_pat
     # even when explicitly marked dynamic, silently producing a graph that
     # only works for batch=1. Using batch=2 for tracing avoids this.
     dummy_input = torch.randint(0, 256, (2, h, w, 3), dtype=torch.uint8, device=device)
-    batch = Dim("batch")
+    # An unbounded Dim("batch") makes torch.export's constraint solver blow up
+    # ("AssertionError: batch < 2147483647/16777216") on this graph - giving
+    # it explicit min/max avoids that and also bakes a validity range into
+    # the ONNX graph. At runtime (onnxruntime) the batch dim stays symbolic
+    # and any batch size can be requested; min/max only affect export-time
+    # solving and are not enforced by onnxruntime itself.
+    batch = Dim("batch", min=batch_min, max=batch_max)
 
     print(f"Compiling computational graph (dynamic batch, fixed {h}x{w}) to {onnx_path}...")
 
@@ -185,6 +236,13 @@ def export_fp32(wrapper: InferenceWrapper, image_size: tuple[int, int], onnx_pat
     stray_data_file = onnx_path.with_name(onnx_path.name + ".data")
     if stray_data_file.exists():
         stray_data_file.unlink()
+
+    # The dynamic-batch translation can emit a graph whose nodes aren't in
+    # strict topological order (harmless for onnxruntime inference, but it
+    # trips up onnx shape_inference / the int8 quantizer below) - re-sort it.
+    import onnx
+    from onnxruntime.transformers.onnx_model import OnnxModel
+
     onnx_model = onnx.load(str(onnx_path))
     sorted_model = OnnxModel(onnx_model)
     sorted_model.topological_sort()
@@ -193,6 +251,15 @@ def export_fp32(wrapper: InferenceWrapper, image_size: tuple[int, int], onnx_pat
 
 
 def convert_to_fp16(fp32_path: Path, fp16_path: Path):
+    try:
+        import onnx
+        from onnxconverter_common import float16
+    except ImportError as e:
+        raise ImportError(
+            "FP16 export requires 'onnx' and 'onnxconverter-common' "
+            "(pip install onnx onnxconverter-common)"
+        ) from e
+
     model = onnx.load(str(fp32_path))
     # keep_io_types=True: input stays uint8, output stays float32, so the
     # inference code does not need any change - only internal compute is fp16.
@@ -221,6 +288,9 @@ def _make_calibration_reader(
     quantization pipeline and try out INT8 speed, but not representative of
     real data, so accuracy should not be trusted; pass real images for that.
     """
+    import numpy as np
+    from onnxruntime.quantization import CalibrationDataReader
+
     h, w = image_size
     image_paths = []
     if calibration_images_dir:
@@ -266,6 +336,13 @@ def _make_calibration_reader(
 def convert_to_int8(
     fp32_path: Path, int8_path: Path, image_size: tuple[int, int], calibration_images_dir: str | None = None
 ):
+    try:
+        from onnxruntime.quantization import quantize_static, QuantType, QuantFormat
+    except ImportError as e:
+        raise ImportError(
+            "INT8 export requires 'onnxruntime' (pip install onnxruntime)"
+        ) from e
+
     # Static/calibrated quantization (QDQ format): the standard, GPU/TensorRT
     # friendly way to get INT8 for a CNN. Dynamic (weight-only) quantization
     # was tried first but onnxruntime's quantize_dynamic unconditionally runs
@@ -294,6 +371,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--backbone", type=str, default="wide_resnet50_2")
     parser.add_argument("--layers", type=str, nargs="+", default=["layer2", "layer3"])
     parser.add_argument("--patch_size", type=int, default=3)
+    parser.add_argument(
+        "--batch_min",
+        type=int,
+        default=1,
+        help="Minimum batch size the exported graph declares support for (default: 1). "
+             "Does not limit what onnxruntime accepts at inference time; only affects "
+             "torch.export's shape solving at export time.",
+    )
+    parser.add_argument(
+        "--batch_max",
+        type=int,
+        default=64,
+        help="Maximum batch size the exported graph declares support for (default: 64). "
+             "Does not limit what onnxruntime accepts at inference time; only affects "
+             "torch.export's shape solving at export time.",
+    )
     parser.add_argument(
         "--precision",
         type=str,
@@ -335,7 +428,7 @@ def main():
     weights_path = Path(args.weights_path)
     onnx_path = weights_path.with_suffix(".onnx")
 
-    export_fp32(wrapper, config["image_size"], onnx_path, device)
+    export_fp32(wrapper, config["image_size"], onnx_path, device, args.batch_min, args.batch_max)
 
     print(f"✅ ONNX (fp32) export successful: {onnx_path} (self-contained, no .onnx.data required)")
     print("   Input 'image': uint8 [B, H, W, 3] RGB - preprocessing (resize/normalize) is in-graph.")
