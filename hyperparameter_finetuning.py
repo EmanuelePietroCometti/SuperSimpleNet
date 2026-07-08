@@ -26,7 +26,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--results_save_path", type=str, default="./results_optuna", help="Directory for saving results")
     parser.add_argument("--epochs", type=int, default=20, help="Number of training epochs per trial")
     parser.add_argument("--batch", type=int, default=4, help="Batch size")
-    parser.add_argument("--num_workers", type=int, default=2, help="DataLoader workers")
+    parser.add_argument("--num_workers", type=int, default=1, help="DataLoader workers")
     parser.add_argument("--n_trials", type=int, default=30, help="Number of Optuna trials to run")
     parser.add_argument("--seed", type=int, default=42, help="Global random seed")
 
