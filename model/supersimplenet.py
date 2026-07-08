@@ -226,12 +226,6 @@ class Discriminator(nn.Module):
             in_chanels=projection_dim + 1, out_chanels=128, kernel_size=5
         )
 
-        self.map_avg_pool = nn.AdaptiveAvgPool2d(output_size=(1, 1))
-        self.map_max_pool = nn.AdaptiveMaxPool2d(output_size=(1, 1))
-
-        self.dec_avg_pool = nn.AdaptiveAvgPool2d(output_size=(1, 1))
-        self.dec_max_pool = nn.AdaptiveMaxPool2d(output_size=(1, 1))
-
         self.fc_score = nn.Linear(in_features=128 * 2 + 2, out_features=1)
 
         self.apply(init_weights)
@@ -254,21 +248,26 @@ class Discriminator(nn.Module):
         mask_cat = torch.cat((cls_features, map_dec_copy), dim=1)
         dec_out = self.dec_head(mask_cat)
 
-        dec_max = self.dec_max_pool(dec_out)
-        dec_avg = self.dec_avg_pool(dec_out)
+        # NOTE: reduce directly with amax/mean over the spatial dims instead of
+        # AdaptiveMaxPool2d/AdaptiveAvgPool2d(1) + squeeze(dim=(2, 3)) - the
+        # pooling+tuple-squeeze combo makes the dynamo ONNX exporter emit a
+        # Loop/SequenceEmpty construct (with a malformed, non-topologically
+        # sorted graph) once seg/cls features come from a dynamic-batch chain,
+        # which then breaks symbolic shape inference (e.g. onnxruntime static
+        # quantization) downstream. This is numerically identical.
+        dec_max = torch.amax(dec_out, dim=(2, 3))
+        dec_avg = torch.mean(dec_out, dim=(2, 3))
 
-        map_max = self.map_max_pool(map)
+        map_max = torch.amax(map, dim=(2, 3))
         if self.stop_grad:
             map_max = map_max.detach()
 
-        map_avg = self.map_avg_pool(map)
+        map_avg = torch.mean(map, dim=(2, 3))
         if self.stop_grad:
             map_avg = map_avg.detach()
 
         # final dec layer: conv channel max and avg and map max and avg
-        dec_cat = torch.cat((dec_max, dec_avg, map_max, map_avg), dim=1).squeeze(
-            dim=(2, 3)
-        )
+        dec_cat = torch.cat((dec_max, dec_avg, map_max, map_avg), dim=1)
         score = self.fc_score(dec_cat).squeeze(dim=1)
 
         return map, score
