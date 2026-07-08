@@ -7,6 +7,12 @@ from torch.export import Dim
 
 from model.supersimplenet import SuperSimpleNet
 
+import onnx
+from onnxconverter_common import float16
+from onnxruntime.transformers.onnx_model import OnnxModel
+import numpy as np
+from onnxruntime.quantization import CalibrationDataReader, quantize_static, QuantType, QuantFormat
+
 # ImageNet stats used by the train/eval preprocessing pipelines
 # (see train.py / eval.py gpu_transforms) - baked into the graph below.
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
@@ -179,13 +185,6 @@ def export_fp32(wrapper: InferenceWrapper, image_size: tuple[int, int], onnx_pat
     stray_data_file = onnx_path.with_name(onnx_path.name + ".data")
     if stray_data_file.exists():
         stray_data_file.unlink()
-
-    # The dynamic-batch translation can emit a graph whose nodes aren't in
-    # strict topological order (harmless for onnxruntime inference, but it
-    # trips up onnx shape_inference / the int8 quantizer below) - re-sort it.
-    import onnx
-    from onnxruntime.transformers.onnx_model import OnnxModel
-
     onnx_model = onnx.load(str(onnx_path))
     sorted_model = OnnxModel(onnx_model)
     sorted_model.topological_sort()
@@ -194,15 +193,6 @@ def export_fp32(wrapper: InferenceWrapper, image_size: tuple[int, int], onnx_pat
 
 
 def convert_to_fp16(fp32_path: Path, fp16_path: Path):
-    try:
-        import onnx
-        from onnxconverter_common import float16
-    except ImportError as e:
-        raise ImportError(
-            "FP16 export requires 'onnx' and 'onnxconverter-common' "
-            "(pip install onnx onnxconverter-common)"
-        ) from e
-
     model = onnx.load(str(fp32_path))
     # keep_io_types=True: input stays uint8, output stays float32, so the
     # inference code does not need any change - only internal compute is fp16.
@@ -231,9 +221,6 @@ def _make_calibration_reader(
     quantization pipeline and try out INT8 speed, but not representative of
     real data, so accuracy should not be trusted; pass real images for that.
     """
-    import numpy as np
-    from onnxruntime.quantization import CalibrationDataReader
-
     h, w = image_size
     image_paths = []
     if calibration_images_dir:
@@ -279,13 +266,6 @@ def _make_calibration_reader(
 def convert_to_int8(
     fp32_path: Path, int8_path: Path, image_size: tuple[int, int], calibration_images_dir: str | None = None
 ):
-    try:
-        from onnxruntime.quantization import quantize_static, QuantType, QuantFormat
-    except ImportError as e:
-        raise ImportError(
-            "INT8 export requires 'onnxruntime' (pip install onnxruntime)"
-        ) from e
-
     # Static/calibrated quantization (QDQ format): the standard, GPU/TensorRT
     # friendly way to get INT8 for a CNN. Dynamic (weight-only) quantization
     # was tried first but onnxruntime's quantize_dynamic unconditionally runs
