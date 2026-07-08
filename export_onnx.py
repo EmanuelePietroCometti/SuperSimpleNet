@@ -148,9 +148,9 @@ class InferenceWrapper(torch.nn.Module):
     def forward(self, image: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         # image: uint8, [B, H, W, 3], RGB. H/W must match self.image_size -
         # only B is dynamic in the exported graph (see export_fp32 below).
-        x = image.permute(0, 3, 1, 2).float() / 255.0
+        x = image.float() / 255.0
         x = F.interpolate(
-            x, size=self.image_size, mode="bilinear", align_corners=False, antialias=True
+            x, size=self.image_size, mode="bilinear", align_corners=False, antialias=False
         )
         x = (x - self.image_mean) / self.image_std
 
@@ -202,7 +202,7 @@ def export_fp32(
     # if traced with batch=1, torch.export bakes batch as a static constant
     # even when explicitly marked dynamic, silently producing a graph that
     # only works for batch=1. Using batch=2 for tracing avoids this.
-    dummy_input = torch.randint(0, 256, (2, h, w, 3), dtype=torch.uint8, device=device)
+    dummy_input = torch.randint(0, 256, (2, 3, h, w), dtype=torch.float32, device=device)
     # An unbounded Dim("batch") makes torch.export's constraint solver blow up
     # ("AssertionError: batch < 2147483647/16777216") on this graph - giving
     # it explicit min/max avoids that and also bakes a validity range into
@@ -269,7 +269,7 @@ def convert_to_fp16(fp32_path: Path, fp16_path: Path):
     # an inconsistent graph onnxruntime refuses to load. Blocking Cast makes
     # it insert its own consistent adapter casts instead.
     model_fp16 = float16.convert_float_to_float16(
-        model, keep_io_types=True, op_block_list=["Cast"]
+        model, keep_io_types=True
     )
     onnx.checker.check_model(model_fp16)
     onnx.save(model_fp16, str(fp16_path))
@@ -324,9 +324,11 @@ def _make_calibration_reader(
                 from PIL import Image
                 img = np.array(
                     Image.open(image_paths[self._index]).convert("RGB").resize((w, h))
-                )
+                ).astype(np.float32) / 255.0
             else:
                 img = np.random.randint(0, 256, (h, w, 3), dtype=np.uint8)
+
+            img = np.transpose(img, (2,0,1))
             self._index += 1
             return {"image": img[None, ...]}
 
