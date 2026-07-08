@@ -27,7 +27,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=20, help="Number of training epochs per trial")
     parser.add_argument("--batch", type=int, default=4, help="Batch size")
     parser.add_argument("--num_workers", type=int, default=2, help="DataLoader workers")
-    
+    parser.add_argument("--n_trials", type=int, default=30, help="Number of Optuna trials to run")
+    parser.add_argument("--seed", type=int, default=42, help="Global random seed")
+
     return parser.parse_args()
 
 def objective(trial: optuna.Trial, args: argparse.Namespace) -> float:
@@ -78,7 +80,7 @@ def objective(trial: optuna.Trial, args: argparse.Namespace) -> float:
         "noise_std": noise_std,
         "perlin_thr": perlin_thr,
         "image_size": (256, 256),
-        "seed": 42,
+        "seed": args.seed,
         "batch": args.batch,
         "epochs": args.epochs,
         "flips": True,
@@ -101,7 +103,7 @@ def objective(trial: optuna.Trial, args: argparse.Namespace) -> float:
     model = SuperSimpleNet(image_size=config["image_size"], config=config)
     
     datamodule = MVTec(
-        root=Path(config["datasets_folder"]) / "mvtec",
+        root=Path(config["datasets_folder"]),
         category=config["category"],
         image_size=config["image_size"],
         train_batch_size=config["batch"],
@@ -143,7 +145,7 @@ def main():
         load_if_exists=True
     )
     
-    study.optimize(lambda trial: objective(trial, args), n_trials=30)
+    study.optimize(lambda trial: objective(trial, args), n_trials=args.n_trials)
     
     print("\n--- OPTIMIZATION COMPLETE ---")
     best_trial = study.best_trial
