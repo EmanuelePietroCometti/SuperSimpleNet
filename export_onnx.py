@@ -132,16 +132,21 @@ EXPORT_METADATA = {
 }
 
 
-def _write_metadata(onnx_path: Path) -> None:
+def _write_metadata(onnx_path: Path, weights_source: str) -> None:
+    """weights_source: "checkpoint:<filename>" for real exports, or
+    "random_self_test" for --self_test exports. The inference runtime refuses to
+    score with a random_self_test model (untrained weights produce garbage that
+    masquerades as a pipeline bug)."""
     import onnx
     m = onnx.load(str(onnx_path))
-    for k, v in EXPORT_METADATA.items():
+    for k, v in {**EXPORT_METADATA, "weights_source": weights_source}.items():
         entry = m.metadata_props.add()
         entry.key, entry.value = k, v
     onnx.save(m, str(onnx_path))
 
 
-def export_fp32(wrapper: nn.Module, image_size: tuple[int, int], onnx_path: Path, device: str):
+def export_fp32(wrapper: nn.Module, image_size: tuple[int, int], onnx_path: Path, device: str,
+                weights_source: str = "unknown"):
     h, w = image_size
     # Trace with batch=2 so no dimension is accidentally specialized to 1.
     dummy = torch.randn(2, 3, h, w, dtype=torch.float32, device=device)
@@ -168,7 +173,7 @@ def export_fp32(wrapper: nn.Module, image_size: tuple[int, int], onnx_path: Path
 
     import onnx
     onnx.checker.check_model(str(onnx_path))
-    _write_metadata(onnx_path)
+    _write_metadata(onnx_path, weights_source)
     return onnx_path
 
 
@@ -199,6 +204,16 @@ def main():
     }
 
     if args.self_test:
+        if args.weights_path is not None:
+            # Refuse rather than silently exporting random weights: an untrained
+            # model produces garbage output that masquerades as a pipeline bug
+            # (this exact mistake shipped a random-weights SK-RD4AD model that
+            # scored ~1 on every image).
+            raise SystemExit(
+                "ERROR: --self_test and a weights_path are mutually exclusive.\n"
+                "  - To export your TRAINED model:  python export_onnx.py <weights.pt> [...]\n"
+                "  - To test the export pipeline with random weights:  python export_onnx.py --self_test"
+            )
         weights = None
     elif args.weights_path is None:
         raise SystemExit("Provide a weights_path, or pass --self_test to export with random weights.")
@@ -222,8 +237,9 @@ def main():
         onnx_path = Path("supersimplenet_selftest.onnx")
     onnx_path.parent.mkdir(parents=True, exist_ok=True)
 
-    print(f"\n--- Exporting SuperSimpleNet (pure graph) -> {onnx_path} ---")
-    export_fp32(wrapper, config["image_size"], onnx_path, device)
+    weights_source = f"checkpoint:{weights.name}" if weights is not None else "random_self_test"
+    print(f"\n--- Exporting SuperSimpleNet (pure graph, weights: {weights_source}) -> {onnx_path} ---")
+    export_fp32(wrapper, config["image_size"], onnx_path, device, weights_source)
     print(f"[OK] fp32 export: {onnx_path}")
     print(f"     input 'input_tensor' : float32 [B,3,{config['image_size'][0]},{config['image_size'][1]}] "
           f"(host-normalized, ImageNet)")
