@@ -114,6 +114,33 @@ def build_export_model(config: dict, weights_path: Path | None, device: str) -> 
 # ---------------------------------------------------------------------------
 # Export
 # ---------------------------------------------------------------------------
+# Embedded in the .onnx file so the inference runtime (inference_simulation) can
+# auto-configure blur/scoring instead of relying on CLI flags. Unlike SK-RD4AD,
+# SuperSimpleNet's anomaly_score IS the number to threshold on directly (a
+# dedicated classification head, see Discriminator.fc_score in
+# model/supersimplenet.py) - it is not derived from the map, so
+# score_source="graph". The blur (kernel=25, sigma=4) matches
+# AnomalyMapGenerator(sigma=4) and is display/consistency only, not required to
+# reproduce the score.
+EXPORT_METADATA = {
+    "anomaly_export_contract": "1.0",
+    "architecture": "supersimplenet",
+    "score_source": "graph",
+    "blur_kernel_size": "25",
+    "blur_sigma": "4.0",
+    "verified": "true",
+}
+
+
+def _write_metadata(onnx_path: Path) -> None:
+    import onnx
+    m = onnx.load(str(onnx_path))
+    for k, v in EXPORT_METADATA.items():
+        entry = m.metadata_props.add()
+        entry.key, entry.value = k, v
+    onnx.save(m, str(onnx_path))
+
+
 def export_fp32(wrapper: nn.Module, image_size: tuple[int, int], onnx_path: Path, device: str):
     h, w = image_size
     # Trace with batch=2 so no dimension is accidentally specialized to 1.
@@ -141,6 +168,7 @@ def export_fp32(wrapper: nn.Module, image_size: tuple[int, int], onnx_path: Path
 
     import onnx
     onnx.checker.check_model(str(onnx_path))
+    _write_metadata(onnx_path)
     return onnx_path
 
 
