@@ -179,8 +179,15 @@ def main():
 
     wrapper = build_export_model(config, weights, device)
 
+    # Resolve the output path. --output may be a full .onnx path OR a directory
+    # (detected if it exists as a dir or lacks the .onnx suffix); a directory
+    # gets an auto-derived filename, avoiding the PermissionError/IsADirectoryError
+    # that torch.onnx.export raises when handed a directory to open for writing.
+    default_stem = weights.stem if weights is not None else "supersimplenet_selftest"
     if args.output:
         onnx_path = Path(args.output)
+        if onnx_path.is_dir() or onnx_path.suffix.lower() != ".onnx":
+            onnx_path = onnx_path / f"{default_stem}.onnx"
     elif weights is not None:
         onnx_path = weights.with_suffix(".onnx")
     else:
