@@ -1,53 +1,40 @@
 """
-export_onnx.py — Export SuperSimpleNet to a *pure* ONNX graph.
+export_onnx.py — Export SuperSimpleNet nel contratto ONNX 3.0 condiviso.
 
-Root cause of the "meaningless output" bug
--------------------------------------------
-The previous export baked the full pre/post-processing pipeline into the graph
-(uint8->float, resize, ImageNet normalize, sigmoid, Gaussian blur). The GPU
-inference runtime (``inference_simulation``) *also* performs normalization and
-blur on the host. Whenever both sides ran, the image was normalized twice and
-the map blurred/rescaled twice, so the anomaly map and score were numerically
-meaningless even though the trained PyTorch model was correct.
+Contratto 3.0 (vedi export_common.py — identico per le 4 architetture)
+----------------------------------------------------------------------
+    Input   "image"         : float32 [B, 3, H, W]
+            RGB in [0,1], gia' alla risoluzione del modello.
+            NON normalizzato: la normalizzazione ImageNet e' un nodo del
+            grafo (InGraphNormalize), quindi non puo' essere dimenticata
+            o applicata due volte dall'host — il bug che aveva fatto
+            crollare l'AUROC da ~0.91 a ~0.51 in eval.py.
+    Output  "anomaly_map"   : float32 [B, 1, H, W]
+            mappa FINALE: upsample bilineare + blur gaussiano canonico
+            (kernel=25, sigma=4, identico a training/eval) applicati
+            in-graph. Nessun min-max, nessuna soglia.
+    Output  "anomaly_score" : float32 [B]
+            numero FINALE: sigmoid(fc_score logit), lo stesso valore su
+            cui eval.py:74 calcola soglie e metriche. Direttamente
+            confrontabile con metadata["calibrated_threshold"].
 
-Fix / design contract (identical for all 4 architectures)
----------------------------------------------------------
-The exported graph is now a *pure forward pass* — feature extraction + score
-computation only. All pre/post-processing lives on the host.
+Solo l'asse batch e' dinamico; H/W sono fissati alla risoluzione di training.
+Il grafo e' sempre fp32: fp16/int8 sono responsabilita' del runtime e
+richiedono ri-calibrazione della soglia.
 
-    Input   "input_tensor" : float32 [B, 3, H, W]
-            Already resized to the training size and ImageNet-normalized by the
-            host (mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225]). This is
-            exactly what SuperSimpleNet's FeatureExtractor expects — it does no
-            normalization internally.
-    Output  "anomaly_map"   : float32 [B, 1, H, W]  raw seg map, bilinearly
-            upscaled to input HxW. NO Gaussian blur, NO min-max, NO threshold.
-    Output  "anomaly_score" : float32 [B]           raw fc_score logit. NO
-            sigmoid.
+Nota sulla soglia — piecewise_min_max_calibration (eval.py:131) e' una
+trasformazione monotona applicata DOPO la sigmoid: la soglia da scrivere nei
+metadati ("calibrated_threshold") deve essere quella sulla scala sigmoid
+PRE-calibrazione (raw_img_th in eval.py:111), che e' esattamente la scala
+dello score emesso da questo grafo.
 
-Only the batch dimension is dynamic (``dynamic_axes``); H/W are fixed to the
-training ``image_size``. The host applies blur + folder-global min-max exactly
-as ``inference_simulation/src/postprocessing.py`` already does.
-
-Notes
------
-* Training is untouched: we build a thin *export-only* wrapper around a model in
-  ``eval()`` mode, so the training ``forward()`` and its GPU speed are unchanged
-  (constraint #5).
-* The classic (TorchScript) exporter is used with an explicit ``dynamic_axes``
-  dict. Since resize + antialias moved to the host, the graph no longer needs
-  the dynamo-only ``aten::_upsample_bilinear2d_aa`` op, so the simpler, more
-  predictable exporter works and honours constraint #2 (``dynamic_axes``).
-
-The graph is always fp32. Reduced precision (fp16/int8) is intentionally NOT
-produced here: it is the inference program's job to cast the fp32 graph to the
-target precision for its hardware (e.g. TensorRT fp16/int8), so a single
-canonical fp32 artifact stays the source of truth.
+Il training non viene toccato: si esporta un wrapper attorno a un modello in
+eval(), quindi forward() di training e velocita' GPU restano invariati.
 
 Usage
 -----
     python export_onnx.py weights.pt --image_size 512 512 -o model.onnx
-    python export_onnx.py --self_test          # random weights, no checkpoint
+    python export_onnx.py --self_test          # pesi random, nessun checkpoint
 """
 
 import argparse
@@ -55,131 +42,105 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
+from export_common import (
+    ExportWrapper,
+    build_metadata,
+    export,
+    resolve_output_path,
+    verify,
+)
 from model.supersimplenet import SuperSimpleNet
 
-# I/O contract shared by every exported architecture.
-INPUT_NAMES = ["input_tensor"]
-OUTPUT_NAMES = ["anomaly_map", "anomaly_score"]
-OPSET = 17
 
+class ExportGaussianBlur(nn.Module):
+    """Clone ONNX-esportabile del GaussianBlur di torchvision.
 
-# ---------------------------------------------------------------------------
-# Export-only wrapper (does NOT touch the training forward path)
-# ---------------------------------------------------------------------------
-class PureInferenceWrapper(nn.Module):
+    torchvision.transforms.GaussianBlur costruisce il kernel a runtime da
+    tensori (linspace/exp), quindi l'exporter classico vede una convoluzione
+    con kernel di forma ignota e fallisce ("Unsupported: ONNX export of
+    convolution for kernel of unknown shape"). Qui il kernel — stessa
+    matematica di _get_gaussian_kernel1d/2d — e' precalcolato come buffer,
+    cosi' diventa un initializer costante del grafo. Pad reflect + conv2d
+    replicano esattamente il percorso di torchvision; l'equivalenza numerica
+    e' verificata con un assert in _swap_blur_for_export, non assunta.
     """
-    Wraps a SuperSimpleNet in eval mode so the exported graph is a pure forward
-    pass: normalized tensor in -> (raw anomaly_map, raw anomaly_score) out.
 
-    The wrapped model's ``AnomalyMapGenerator.blur`` is replaced with Identity
-    (blur is host-side post-processing) and the score is returned as the raw
-    fc_score logit (no sigmoid). Everything else — feature extraction, feature
-    adaptor, discriminator, bilinear upscale of the map — stays in-graph because
-    it is the *core* computation, deterministic, and identical to training eval.
+    def __init__(self, kernel_size: int, sigma: float, channels: int = 1):
+        super().__init__()
+        ksize_half = (kernel_size - 1) * 0.5
+        x = torch.linspace(-ksize_half, ksize_half, steps=kernel_size)
+        pdf = torch.exp(-0.5 * (x / sigma).pow(2))
+        kernel1d = pdf / pdf.sum()
+        kernel2d = torch.mm(kernel1d[:, None], kernel1d[None, :])
+        self.register_buffer(
+            "weight", kernel2d.expand(channels, 1, kernel_size, kernel_size).clone()
+        )
+        self.channels = channels
+        self.padding = [kernel_size // 2] * 4
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = F.pad(x, self.padding, mode="reflect")
+        return F.conv2d(x, self.weight, groups=self.channels)
+
+
+def _swap_blur_for_export(model: SuperSimpleNet, device: str) -> None:
+    """Sostituisce il blur di torchvision con il clone esportabile, dopo aver
+    dimostrato che i due producono lo stesso output sul device di export."""
+    tv_blur = model.anomaly_map_generator.blur
+    kernel_size = tv_blur.kernel_size[0]
+    sigma = float(tv_blur.sigma[0])
+    export_blur = ExportGaussianBlur(kernel_size, sigma, channels=1).to(device)
+
+    with torch.no_grad():
+        probe = torch.rand(2, 1, 64, 64, device=device)
+        ref, rep = tv_blur(probe), export_blur(probe)
+    if not torch.allclose(ref, rep, atol=1e-6):
+        raise RuntimeError(
+            f"ExportGaussianBlur diverge dal GaussianBlur torchvision "
+            f"(|d|max={(ref - rep).abs().max().item():.2e}): export bloccato."
+        )
+    model.anomaly_map_generator.blur = export_blur
+
+
+class SuperSimpleNetExport(ExportWrapper):
+    """Blur e sigmoid restano NEL grafo (contratto 3.0).
+
+    Il blur e' AnomalyMapGenerator(sigma=4) -> kernel_size = 2*ceil(3*4)+1 = 25,
+    identico a quello usato in training/eval: non va sostituito con Identity
+    (in-graph tramite ExportGaussianBlur, verificato equivalente).
+    La sigmoid replica eval.py:74 (`torch.sigmoid(anomaly_score)`), cosi' lo
+    score esportato e' lo stesso numero su cui eval.py calcola la soglia.
     """
 
     def __init__(self, model: SuperSimpleNet):
         super().__init__()
         self.model = model
 
-    def forward(self, input_tensor: torch.Tensor):
-        # eval-mode SuperSimpleNet.forward returns (anomaly_map, anomaly_score).
-        # anomaly_map is already upscaled to image_size; blur was neutralized to
-        # Identity in build_export_model, so no post-processing is baked in.
-        anomaly_map, anomaly_score = self.model(input_tensor)
-        return anomaly_map, anomaly_score
+    def core(self, x: torch.Tensor):
+        anomaly_map, logit = self.model(x)
+        return anomaly_map, torch.sigmoid(logit)
 
 
-def build_export_model(config: dict, weights_path: Path | None, device: str) -> PureInferenceWrapper:
+def build_export_model(config: dict, weights_path: Path | None, device: str) -> SuperSimpleNetExport:
     """Build a SuperSimpleNet, load weights (unless None => random self-test),
-    put it in a pure-forward state, and wrap it for export."""
+    put it in eval mode, and wrap it for export. AnomalyMapGenerator (upsample
+    + blur) resta nel grafo: nel contratto 3.0 la mappa esportata e' finale."""
     model = SuperSimpleNet(image_size=config["image_size"], config=config)
     if weights_path is not None:
         model.load_model(weights_path)
     model.to(device).eval()
+    _swap_blur_for_export(model, device)
 
-    # Strip the Gaussian blur from the graph: it is host-side post-processing
-    # (see inference_simulation/src/postprocessing.py::apply_training_blur).
-    # The bilinear upscale in AnomalyMapGenerator stays — it only reshapes the
-    # map to input resolution and is deterministic.
-    model.anomaly_map_generator.blur = nn.Identity()
-
-    wrapper = PureInferenceWrapper(model).to(device).eval()
+    wrapper = SuperSimpleNetExport(model).to(device).eval()
     for p in wrapper.parameters():
         p.requires_grad_(False)
     return wrapper
 
 
-# ---------------------------------------------------------------------------
-# Export
-# ---------------------------------------------------------------------------
-# Embedded in the .onnx file so the inference runtime (inference_simulation) can
-# auto-configure blur/scoring instead of relying on CLI flags. Unlike SK-RD4AD,
-# SuperSimpleNet's anomaly_score IS the number to threshold on directly (a
-# dedicated classification head, see Discriminator.fc_score in
-# model/supersimplenet.py) - it is not derived from the map, so
-# score_source="graph". The blur (kernel=25, sigma=4) matches
-# AnomalyMapGenerator(sigma=4) and is display/consistency only, not required to
-# reproduce the score.
-EXPORT_METADATA = {
-    "anomaly_export_contract": "1.0",
-    "architecture": "supersimplenet",
-    "score_source": "graph",
-    "blur_kernel_size": "25",
-    "blur_sigma": "4.0",
-    "verified": "true",
-}
-
-
-def _write_metadata(onnx_path: Path, weights_source: str) -> None:
-    """weights_source: "checkpoint:<filename>" for real exports, or
-    "random_self_test" for --self_test exports. The inference runtime refuses to
-    score with a random_self_test model (untrained weights produce garbage that
-    masquerades as a pipeline bug)."""
-    import onnx
-    m = onnx.load(str(onnx_path))
-    for k, v in {**EXPORT_METADATA, "weights_source": weights_source}.items():
-        entry = m.metadata_props.add()
-        entry.key, entry.value = k, v
-    onnx.save(m, str(onnx_path))
-
-
-def export_fp32(wrapper: nn.Module, image_size: tuple[int, int], onnx_path: Path, device: str,
-                weights_source: str = "unknown"):
-    h, w = image_size
-    # Trace with batch=2 so no dimension is accidentally specialized to 1.
-    dummy = torch.randn(2, 3, h, w, dtype=torch.float32, device=device)
-
-    dynamic_axes = {
-        "input_tensor": {0: "batch"},
-        "anomaly_map": {0: "batch"},
-        "anomaly_score": {0: "batch"},
-    }
-
-    with torch.no_grad():
-        torch.onnx.export(
-            wrapper,
-            (dummy,),
-            str(onnx_path),
-            input_names=INPUT_NAMES,
-            output_names=OUTPUT_NAMES,
-            dynamic_axes=dynamic_axes,
-            opset_version=OPSET,
-            do_constant_folding=True,
-            dynamo=False,          # classic exporter honours the dynamic_axes dict
-            external_data=False,   # single self-contained .onnx file
-        )
-
-    import onnx
-    onnx.checker.check_model(str(onnx_path))
-    _write_metadata(onnx_path, weights_source)
-    return onnx_path
-
-
-# ---------------------------------------------------------------------------
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Export SuperSimpleNet to a pure ONNX graph")
+    p = argparse.ArgumentParser(description="Export SuperSimpleNet (contratto ONNX 3.0)")
     p.add_argument("weights_path", type=str, nargs="?", default=None,
                    help="Path to trained weights.pt (omit with --self_test)")
     p.add_argument("-o", "--output", type=str, default=None, help="Output .onnx path")
@@ -222,32 +183,37 @@ def main():
 
     wrapper = build_export_model(config, weights, device)
 
-    # Resolve the output path. --output may be a full .onnx path OR a directory
-    # (detected if it exists as a dir or lacks the .onnx suffix); a directory
-    # gets an auto-derived filename, avoiding the PermissionError/IsADirectoryError
-    # that torch.onnx.export raises when handed a directory to open for writing.
-    default_stem = weights.stem if weights is not None else "supersimplenet_selftest"
-    if args.output:
-        onnx_path = Path(args.output)
-        if onnx_path.is_dir() or onnx_path.suffix.lower() != ".onnx":
-            onnx_path = onnx_path / f"{default_stem}.onnx"
-    elif weights is not None:
-        onnx_path = weights.with_suffix(".onnx")
-    else:
-        onnx_path = Path("supersimplenet_selftest.onnx")
-    onnx_path.parent.mkdir(parents=True, exist_ok=True)
+    onnx_path = resolve_output_path(args.output, weights, "supersimplenet_selftest")
 
-    weights_source = f"checkpoint:{weights.name}" if weights is not None else "random_self_test"
-    print(f"\n--- Exporting SuperSimpleNet (pure graph, weights: {weights_source}) -> {onnx_path} ---")
-    export_fp32(wrapper, config["image_size"], onnx_path, device, weights_source)
+    # kernel_size = 2*ceil(3*sigma)+1 = 25 con sigma=4: e' il blur reale di
+    # AnomalyMapGenerator, riportato nei metadati a solo scopo di
+    # documentazione (map_semantics=final_blurred: il runtime non ri-sfoca).
+    metadata = build_metadata(
+        architecture="supersimplenet",
+        image_size=config["image_size"],
+        blur_kernel_size=25,
+        blur_sigma=4.0,
+        dynamic_crop=False,
+        weights_path=weights,
+        resize_mode="bilinear_antialias",  # datamodules/base/datamodule.py:65
+        extra={
+            "backbone": args.backbone,
+            "layers": ",".join(args.layers),
+            "patch_size": args.patch_size,
+        },
+    )
+
+    print(f"\n--- Exporting SuperSimpleNet (contract 3.0, weights: {metadata['weights_source']}) -> {onnx_path} ---")
+    export(wrapper, config["image_size"], onnx_path, device, metadata)
     print(f"[OK] fp32 export: {onnx_path}")
-    print(f"     input 'input_tensor' : float32 [B,3,{config['image_size'][0]},{config['image_size'][1]}] "
-          f"(host-normalized, ImageNet)")
-    print( "     output 'anomaly_map'  : float32 [B,1,H,W] (raw, no blur)")
-    print( "     output 'anomaly_score': float32 [B] (raw logit, no sigmoid)")
+    print(f"     input 'image'         : float32 [B,3,{config['image_size'][0]},{config['image_size'][1]}] "
+          f"RGB [0,1], normalizzazione in-graph")
+    print( "     output 'anomaly_map'  : float32 [B,1,H,W] (finale: upsample + blur in-graph)")
+    print( "     output 'anomaly_score': float32 [B] (finale: sigmoid in-graph)")
+    print( "     NOTA: verified=false — eseguire la calibrazione della soglia per "
+           "scrivere calibrated_threshold/calibration_global_min/max e verified=true.")
 
     if args.self_test:
-        from verify_onnx_parity import verify
         verify(wrapper, onnx_path, config["image_size"], device)
 
 
