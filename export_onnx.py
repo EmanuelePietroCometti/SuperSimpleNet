@@ -46,6 +46,7 @@ import torch.nn.functional as F
 
 from export_common import (
     ExportWrapper,
+    assert_trained_bn,
     build_metadata,
     export,
     resolve_output_path,
@@ -130,6 +131,16 @@ def build_export_model(config: dict, weights_path: Path | None, device: str) -> 
     model = SuperSimpleNet(image_size=config["image_size"], config=config)
     if weights_path is not None:
         model.load_model(weights_path)
+        # Trained-state guard: the discriminator (seg + cls head) is the trained
+        # part of SSN; its BatchNorm num_batches_tracked is 0 at init and loaded
+        # nonzero from a real checkpoint. The frozen pretrained feature_extractor
+        # is NOT checked (its num_batches_tracked come from ImageNet and would
+        # mask an untrained head). An untrained head exports a valid but
+        # meaningless graph — refuse. --self_test is the explicit escape hatch.
+        assert_trained_bn(
+            model.discriminator,
+            f"SuperSimpleNet export (weights: {weights_path.name})",
+        )
     model.to(device).eval()
     _swap_blur_for_export(model, device)
 

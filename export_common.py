@@ -1,9 +1,20 @@
 """
 export_common.py — Contratto di export ONNX condiviso dalle 4 architetture.
 
-Unica fonte di verità per: nomi I/O, opset, assi dinamici, schema metadati,
-normalizzazione in-graph, verifica di parità. Nessun exporter deve
-reimplementare questi elementi: ogni duplicazione è una divergenza futura.
+Unica fonte di verita' per: nomi I/O, opset, assi dinamici, schema metadati,
+normalizzazione in-graph, verifica di parita', guard sullo stato addestrato.
+Nessun exporter deve reimplementare questi elementi: ogni duplicazione e' una
+divergenza futura.
+
+Questo file va copiato IDENTICO (byte per byte) nei tre repository:
+    SuperSimpleNet/export_common.py
+    anomaly_detection_for_textile_industry/src/export_common.py
+    SK-RD4AD/export_common.py
+Se lo modifichi in uno, propagalo negli altri e riscrivi EXPORT_COMMON_SHA256
+(vedi check_contract_sync.py, che fallisce se le copie divergono o se l'hash
+non corrisponde al contenuto).
+
+Il perimetro normativo e' la sezione 2 di CONTRACT.md.
 """
 from __future__ import annotations
 
@@ -13,6 +24,13 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
+
+# Hash di integrita' del contratto: sha256 esadecimale di QUESTO file con il
+# valore di EXPORT_COMMON_SHA256 sostituito da 64 '0'. Serve a due cose:
+# (1) rilevare se una copia e' stata modificata senza aggiornare l'hash;
+# (2) dare a check_contract_sync.py un valore atteso stabile da confrontare tra
+# le tre repo. Rigeneralo con:  python check_contract_sync.py --write-hash
+EXPORT_COMMON_SHA256 = "ba2a1cef8c785c63596ba9ad4756d73d487795f802e59dea75f856b054219587"
 
 EXPORT_CONTRACT = "3.0"
 OPSET = 17
@@ -34,6 +52,9 @@ class InGraphNormalize(nn.Module):
     """Normalizzazione ImageNet come nodo del grafo.
 
     L'input del grafo e' RGB in [0,1]; questo modulo applica (x - mean) / std.
+    Tenerla qui invece che sull'host elimina la classe di bug
+    "normalizzazione dimenticata / applicata due volte", che ha gia' colpito
+    SuperSimpleNet/eval.py (AUROC 0.91 -> 0.51) e inference-gpu.cpp.
 
     I buffer sono registrati (non costanti Python) cosi' finiscono come
     initializer del grafo e sono ispezionabili con netron.
@@ -72,6 +93,45 @@ class ExportWrapper(nn.Module):
             anomaly_map = anomaly_map.unsqueeze(1)
         anomaly_score = anomaly_score.reshape(anomaly_score.shape[0])
         return anomaly_map, anomaly_score
+
+
+def assert_trained_bn(module: nn.Module, context: str) -> None:
+    """Rifiuta l'export se i BatchNorm di `module` non hanno mai visto dati.
+
+    Un BatchNorm appena inizializzato ha `num_batches_tracked == 0`; dopo il
+    training (o dopo aver caricato uno state_dict addestrato, che include quel
+    buffer) e' > 0. E' un sentinello di stato addestrato affidabile per le
+    teste allenate di SuperSimpleNet e per il decoder di SK-RD4AD.
+
+    ATTENZIONE: passare SOLO il sotto-modulo effettivamente addestrato. Un
+    backbone pretrained (feature_extractor) porta num_batches_tracked ereditati
+    da ImageNet e falserebbe il controllo.
+
+    Solleva RuntimeError con l'indicazione di cosa manca; non fa mai fallback.
+    """
+    counts = [
+        int(m.num_batches_tracked)
+        for m in module.modules()
+        if isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d))
+        and m.num_batches_tracked is not None
+    ]
+    if not counts:
+        raise RuntimeError(
+            f"{context}: nessun BatchNorm con num_batches_tracked trovato in "
+            f"'{module.__class__.__name__}'. Il guard sullo stato addestrato "
+            "non e' applicabile: verifica di aver passato il sotto-modulo "
+            "allenato giusto, o aggiungi un sentinello specifico per questa "
+            "architettura (cerca i buffer inizializzati a un valore noto)."
+        )
+    if all(c == 0 for c in counts):
+        raise RuntimeError(
+            f"{context}: tutti i BatchNorm hanno num_batches_tracked == 0 → il "
+            "modello non e' addestrato (buffer ai valori di init). Esporto un "
+            "grafo valido ma numericamente privo di senso. Carica un checkpoint "
+            "addestrato, oppure — se vuoi solo testare la pipeline di export — "
+            "usa esplicitamente --self_test (che marca weights_source="
+            "random_self_test, rifiutato dal runtime)."
+        )
 
 
 def sha256_of(path: Path | None) -> str:

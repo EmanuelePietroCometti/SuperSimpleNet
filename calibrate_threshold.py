@@ -7,10 +7,12 @@ scrive nei metadati del file .onnx i valori che il runtime C++ legge all'avvio:
     calibrated_threshold        soglia immagine sullo score finale del grafo
                                 (sigmoid in-graph -> stessa scala di
                                 eval.py raw_img_th, PRE piecewise calibration)
-    calibrated_pixel_threshold  soglia pixel sulla mappa finale (contorni NG)
-    calibration_global_min/max  scala FISSA per la visualizzazione heatmap
+    calibrated_threshold_pixel  soglia pixel sulla mappa finale (contorni NG)
+    calibration_map_min/max     scala FISSA per la visualizzazione heatmap
                                 (niente min-max per-immagine: un patch pulito
                                 deve restare blu)
+    render_lut_rgb_b64          colormap jet condivisa col runtime C++ (LUT
+                                256x3 uint8 RGB, base64)
     verified = true             solo se la calibrazione e' andata a buon fine
 
 Calibrare sull'ONNX invece che sul PyTorch chiude il cerchio: "verified"
@@ -31,9 +33,11 @@ Usage
 """
 
 import argparse
+import base64
 import datetime
 from pathlib import Path
 
+import cv2
 import numpy as np
 import torch
 from sklearn.metrics import average_precision_score, confusion_matrix, roc_auc_score, roc_curve
@@ -151,6 +155,20 @@ def youden_threshold(y_true: np.ndarray, y_scores: np.ndarray) -> float:
     return float(thresholds[np.argmax(tpr - fpr)])
 
 
+def jet_lut_rgb_b64() -> str:
+    """LUT 256x3 uint8 (RGB) da cv2.COLORMAP_JET, serializzata base64.
+
+    È la colormap condivisa del contratto di rendering (render_reference.py
+    [D-Q3]): incorporandola nei metadati, render_reference.py e il runtime C++
+    consumano gli STESSI 768 byte -> nessuna divergenza jet-matplotlib vs
+    jet-OpenCV. cv2 restituisce BGR: invertiamo l'ultimo asse per avere RGB.
+    """
+    ramp = np.arange(256, dtype=np.uint8).reshape(256, 1)
+    bgr = cv2.applyColorMap(ramp, cv2.COLORMAP_JET).reshape(256, 3)
+    rgb = np.ascontiguousarray(bgr[:, ::-1])  # BGR -> RGB
+    return base64.b64encode(rgb.tobytes()).decode("ascii")
+
+
 def main():
     p = argparse.ArgumentParser(description="Calibra la soglia di un export ONNX (contratto 3.0)")
     p.add_argument("onnx_path", type=str, help="Modello .onnx esportato da export_onnx.py")
@@ -210,10 +228,10 @@ def main():
     print(f"confusion @ threshold      : TP={tp} FN={fn} FP={fp} TN={tn}")
     if pixel_threshold is not None:
         print(f"P-AUROC = {p_auroc:.4f}")
-        print(f"calibrated_pixel_threshold = {pixel_threshold:.6f}")
+        print(f"calibrated_threshold_pixel = {pixel_threshold:.6f}")
     else:
-        print("calibrated_pixel_threshold : non definibile (nessun pixel anomalo nelle mask)")
-    print(f"calibration_global_min/max = {r['global_min']:.6f} / {r['global_max']:.6f}")
+        print("calibrated_threshold_pixel : non definibile (nessun pixel anomalo nelle mask)")
+    print(f"calibration_map_min/max    = {r['global_min']:.6f} / {r['global_max']:.6f}")
 
     if i_auroc < args.min_auroc:
         raise SystemExit(
@@ -229,8 +247,15 @@ def main():
 
     updates = {
         "calibrated_threshold": f"{threshold:.6f}",
-        "calibration_global_min": f"{r['global_min']:.6f}",
-        "calibration_global_max": f"{r['global_max']:.6f}",
+        # Chiavi del contratto di rendering (render_reference.py [D-Q1]):
+        # range GLOBALE FISSO della MAPPA finale per la normalizzazione display.
+        # Rinominano calibration_global_min/max (che avevano semantica ambigua
+        # score-vs-mappa tra i repo, CONTRACT.md §4-Q1).
+        "calibration_map_min": f"{r['global_min']:.6f}",
+        "calibration_map_max": f"{r['global_max']:.6f}",
+        # LUT jet condivisa (256x3 uint8 RGB, base64) consumata identica da
+        # render_reference.py e dal runtime C++ [D-Q3].
+        "render_lut_rgb_b64": jet_lut_rgb_b64(),
         "calibration_dataset": f"{args.dataset}/{args.category}",
         "calibration_num_good": str(n_good),
         "calibration_num_bad": str(n_bad),
@@ -239,7 +264,8 @@ def main():
         "verified": "true",
     }
     if pixel_threshold is not None:
-        updates["calibrated_pixel_threshold"] = f"{pixel_threshold:.6f}"
+        # Rinominata da calibrated_pixel_threshold [D-Q6].
+        updates["calibrated_threshold_pixel"] = f"{pixel_threshold:.6f}"
         updates["calibration_p_auroc"] = f"{p_auroc:.4f}"
 
     update_metadata(onnx_path, updates)
