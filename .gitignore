@@ -79,3 +79,6 @@ supersimplenet_tuning.db
 hyperparameter_optimization_img
 hyperparameter_finetuning/
 fixtures/
+results/
+checkpoints/
+export/
