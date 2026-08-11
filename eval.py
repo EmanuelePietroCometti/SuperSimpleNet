@@ -41,6 +41,7 @@ def eval(
     normalize: bool = True,
     image_save_path: Path = None,
     score_save_path: Path = None,
+    weights_path: str = None,
 ):
     model.to(device)
     model.eval()
@@ -54,6 +55,7 @@ def eval(
         "anomaly_map": [],
         "gt_mask": [],
         "score": [],
+        "logit": [],
         "seg_score": [],
         "label": [],
         "image_path": [],
@@ -72,6 +74,7 @@ def eval(
         results["gt_mask"].append(batch["mask"].detach().cpu())
 
         results["score"].append(torch.sigmoid(anomaly_score))
+        results["logit"].append(anomaly_score)  # raw classification logit (ONNX output)
         results["seg_score"].append(
             anomaly_map.reshape(anomaly_map.shape[0], -1).max(dim=1).values
         )
@@ -83,6 +86,7 @@ def eval(
     # Global concatenation
     results["anomaly_map"] = torch.cat(results["anomaly_map"])
     results["score"] = torch.cat(results["score"])
+    results["logit"] = torch.cat(results["logit"])
     results["seg_score"] = torch.cat(results["seg_score"])
     results["gt_mask"] = torch.cat(results["gt_mask"])
     results["label"] = torch.cat(results["label"])
@@ -124,6 +128,34 @@ def eval(
 
     fpr_p, tpr_p, thresholds_p = roc_curve(p_true_sub, p_scores_sub)
     raw_pix_th = float(thresholds_p[np.argmax(tpr_p - fpr_p)])
+
+    # --- Persist calibration sidecar for ONNX export (raw scales the graph emits) ---
+    # The exported anomaly_score is the raw classification LOGIT and the anomaly_map
+    # is the raw segmentation-logit map (sigmoid/piecewise calibration stay OUTSIDE
+    # the graph). raw_img_th is a sigmoid probability -> convert to a logit threshold;
+    # raw_pix_th is already on the raw map scale. With normalization_formula =
+    # anomalib_centered the downstream decision threshold is 0.5, reproducing this
+    # eval's operating point (Youden) per-image, without any test-set statistics.
+    if weights_path is not None:
+        import math
+        p = float(min(max(raw_img_th, 1e-6), 1.0 - 1e-6))  # clamp before logit
+        image_threshold_logit = math.log(p / (1.0 - p))
+        logits = results["logit"]
+        calib = {
+            "image_threshold_raw": image_threshold_logit,
+            "pixel_threshold_raw": float(raw_pix_th),
+            "score_min_raw": float(logits.min()),
+            "score_max_raw": float(logits.max()),
+            "map_min_raw": float(am_raw.min()),
+            "map_max_raw": float(am_raw.max()),
+            "normalization_formula": "anomalib_centered",
+            "calibration_split": "test",
+            "calibration_method": "youden",
+        }
+        calib_path = str(weights_path) + ".calib.json"
+        with open(calib_path, "w", encoding="utf-8") as f:
+            json.dump(calib, f, indent=2)
+        print(f"[calib] wrote sidecar: {calib_path}")
 
     # Piecewise Min-Max Calibration (coerente con train.py::test())
     if normalize:
@@ -173,6 +205,42 @@ def eval(
         else:
             print(f"{name}: {value} ", end="")
     print(f"| Opt-Th: {best_threshold:.4f}\n")
+
+    # Confusion matrix at the ACTUAL decision threshold (0.5 when calibrated),
+    # i.e. the same operating point the exported model uses. This is consistent
+    # with Precision/Recall/F1 above (unlike compute_confusion_matrix, which
+    # re-derives an F1-max threshold on the raw scores).
+    _cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
+    _tn, _fp, _fn, _tp = _cm.ravel()
+    print(f"Confusion Matrix @ th={best_threshold:.4f}:  "
+          f"TN={_tn}  FP={_fp}  FN={_fn}  TP={_tp}")
+
+    # Save the confusion matrix as a seaborn heatmap (counts + row-percentages),
+    # at the same 0.5/Youden operating point the exported model uses.
+    cm_out_dir = Path(image_save_path or score_save_path or "./results")
+    cm_out_dir.mkdir(parents=True, exist_ok=True)
+    _row_sums = _cm.sum(axis=1, keepdims=True)
+    _cm_perc = np.divide(
+        _cm, _row_sums, out=np.zeros_like(_cm, dtype=float), where=_row_sums != 0
+    ) * 100.0
+    _annot = np.empty_like(_cm).astype(object)
+    for _i in range(_cm.shape[0]):
+        for _j in range(_cm.shape[1]):
+            _annot[_i, _j] = f"{_cm[_i, _j]}\n({_cm_perc[_i, _j]:.1f}%)"
+    plt.figure(figsize=(5.5, 4.5))
+    sns.heatmap(
+        _cm, annot=_annot, fmt="", cmap="Blues", cbar=True, square=True,
+        linewidths=0.5, linecolor="white",
+        xticklabels=["Good", "Anomaly"], yticklabels=["Good", "Anomaly"],
+    )
+    plt.xlabel("Predicted")
+    plt.ylabel("Ground Truth")
+    plt.title(f"Confusion Matrix (thr={best_threshold:.4f})")
+    plt.tight_layout()
+    _cm_path = cm_out_dir / "confusion_matrix.png"
+    plt.savefig(_cm_path, dpi=200, bbox_inches="tight")
+    plt.close()
+    print(f"[cm] saved confusion matrix: {_cm_path}")
 
     if image_save_path:
         print("Visualizing Anomaly Maps...")
@@ -481,10 +549,11 @@ def run_eval(datasets, ratios, run_id, res_path):
             results = eval(
                 model=model,
                 datamodule=datamodule,
-                device="cuda",
+                device="cuda" if torch.cuda.is_available() else "cpu",
                 image_metrics=image_metrics,
                 pixel_metrics=pixel_metrics,
                 normalize=True,
+                weights_path=weight_path,
                 score_save_path=config["score_save_path"]
                 / config["run_id"]
                 / dataset
@@ -619,9 +688,10 @@ def main():
         pixel_metrics=pixel_metrics,
         normalize=True,
         image_save_path=image_save_path,
-        score_save_path=score_save_path
+        score_save_path=score_save_path,
+        weights_path=args.weights_path,
     )
-    
+
     print(f"Evaluation completed. Results saved in {args.results_save_path}")
 
 if __name__ == "__main__":
