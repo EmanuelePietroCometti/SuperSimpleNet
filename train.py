@@ -43,6 +43,14 @@ from sklearn.metrics import roc_curve, confusion_matrix
 import argparse
 from common.calibration import piecewise_min_max_calibration
 
+from aug_config import AugConfig
+from augment_ssn import (
+    build_photometric_augmentation,
+    equalize_image,
+    GeometricAugmentor,
+    dynamic_crop_joint,
+)
+
 
 def train(
     model: SuperSimpleNet,
@@ -64,10 +72,19 @@ def train(
     best_combined_score = -1.0
     best_model_weights = None
 
-    gpu_transforms = v2.Compose([
-        v2.Resize(size=config["image_size"], antialias=True),
-        v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    ]).to(device)
+    # Resize and Normalize are kept separate so the configurable augmentation can
+    # run in-between, on the [0,1] image (and its mask) BEFORE ImageNet normalization.
+    gpu_resize = v2.Resize(size=config["image_size"], antialias=True).to(device)
+    gpu_normalize = v2.Normalize(
+        mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+    ).to(device)
+
+    # Augmentation is fully driven by the config. Disabled config => no-op, so the
+    # path collapses to the original Resize+Normalize baseline.
+    aug_cfg = config.get("aug_cfg") or AugConfig()
+    photo_aug = build_photometric_augmentation(aug_cfg)  # image-only, or None
+    geo_aug = GeometricAugmentor(aug_cfg)                 # joint image/mask(s)
+    print("Augmentation config:", aug_cfg.to_dict())
 
     model.train()
     train_loader = datamodule.train_dataloader()
@@ -103,7 +120,55 @@ def train(
                 # best downsampling proposed by DestSeg
                 mask = batch["mask"].to(device, dtype=torch.float32, non_blocking=True)
 
-                image_batch = gpu_transforms(image_batch)
+                # loss_mask (distance-transform weights) is loaded here, at full
+                # resolution, so geometric augmentation can keep it aligned.
+                has_loss_mask = "loss_mask" in batch
+                loss_mask_full = (
+                    batch["loss_mask"].to(device, dtype=torch.float32, non_blocking=True)
+                    if has_loss_mask else None
+                )
+
+                # Resize the image to the model resolution (mask/loss_mask already at it).
+                image_batch = gpu_resize(image_batch)
+
+                # ---- Configurable, ablatable augmentation (train-only) ----
+                # Photometric families act on the image; geometric families act
+                # jointly on image + mask (+ loss_mask). Skipped entirely when
+                # disabled => identical to the Resize+Normalize baseline.
+                if aug_cfg.enabled:
+                    # (tensor, fill) specs: 0 => "normal" for the binary mask,
+                    # 1 => "normal" weight for the loss_mask.
+                    mask_specs = [(mask, 0.0)]
+                    if loss_mask_full is not None:
+                        mask_specs.append((loss_mask_full, 1.0))
+
+                    if aug_cfg.dynamic_crop:
+                        image_batch, cropped = dynamic_crop_joint(image_batch, mask_specs)
+                        mask = cropped[0]
+                        if loss_mask_full is not None:
+                            loss_mask_full = cropped[1]
+                        mask_specs = [(mask, 0.0)]
+                        if loss_mask_full is not None:
+                            mask_specs.append((loss_mask_full, 1.0))
+
+                    if aug_cfg.equalize_p > 0 and torch.rand(1).item() < aug_cfg.equalize_p:
+                        image_batch = equalize_image(image_batch)
+
+                    image_batch, geo_masks = geo_aug(image_batch, mask_specs)
+                    mask = geo_masks[0]
+                    if loss_mask_full is not None:
+                        loss_mask_full = geo_masks[1]
+
+                    if photo_aug is not None:
+                        image_batch = photo_aug(image_batch)
+
+                    if aug_cfg.speckle_std > 0:
+                        image_batch = (
+                            image_batch + torch.randn_like(image_batch) * aug_cfg.speckle_std
+                        ).clamp(0, 1)
+
+                # ImageNet normalization for the backbone.
+                image_batch = gpu_normalize(image_batch)
 
                 mask = F.interpolate(
                     mask,
@@ -134,12 +199,11 @@ def train(
                 anomalous_scores = anomaly_map[mask > 0]
                 seg_l1[mask > 0] = torch.clip(-anomalous_scores + th, min=0)
 
-                if "loss_mask" in batch:
-                    loss_mask = batch["loss_mask"].to(device, dtype=torch.float32, non_blocking=True)
-
-                    # resize loss_mask to fit the loss
+                if has_loss_mask:
+                    # loss_mask_full was loaded (and augmented) above; here we only
+                    # resize it to the loss resolution.
                     loss_mask = F.interpolate(
-                        loss_mask,
+                        loss_mask_full,
                         size=seg_focal.shape[-2:],
                         mode="bilinear",
                         align_corners=True,
@@ -807,7 +871,11 @@ def run_unsup(data_name, args):
         "results_save_path": Path(args.results_save_path),
         "th": args.th
     }
-    
+    config["aug_cfg"] = (
+        AugConfig.from_json(args.aug_config)
+        if getattr(args, "aug_config", None) else AugConfig()
+    )
+
     if data_name == "visa":
         config["perlin_thr"] = 0.6
         main_visa(device=device, config=config)
@@ -855,7 +923,11 @@ def run_sup(data_name, args):
         "results_save_path": Path(args.results_save_path),
         "th": args.th
     }
-    
+    config["aug_cfg"] = (
+        AugConfig.from_json(args.aug_config)
+        if getattr(args, "aug_config", None) else AugConfig()
+    )
+
     if data_name == "sensum":
         config["ratio"] = RatioSegmented.M100.value
         if float(config["ratio"]) == 0:
@@ -919,7 +991,10 @@ def get_args_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gamma", type=float, default=0.4, help="Gamma decay parameter")
     parser.add_argument("--eval_step_size", type=int, default=5, help="Number of steps/epochs between evaluations")
     parser.add_argument("--th", type=float, default=0.5, help="Threshold applied for binary classification/segmentation")
-    
+
+    parser.add_argument("--aug_config", type=str, default=None,
+                        help="Path to an augmentation JSON config; if omitted, augmentation is OFF (clean baseline)")
+
     return parser
 
 def main():
