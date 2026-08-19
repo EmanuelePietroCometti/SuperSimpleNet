@@ -2,8 +2,6 @@ from abc import ABC
 from enum import Enum
 from pathlib import Path
 
-import albumentations as A
-from albumentations.pytorch import ToTensorV2
 from anomalib.data.base.datamodule import collate_fn
 from anomalib.data.utils import InputNormalizationMethod
 from pytorch_lightning import LightningDataModule
@@ -12,6 +10,8 @@ from torch.utils.data import DataLoader
 
 from datamodules.base import Supervision
 from datamodules.base.dataset import SSNDataset
+
+from torchvision.transforms import v2
 
 
 class SSNDataModule(LightningDataModule, ABC):
@@ -62,32 +62,8 @@ class SSNDataModule(LightningDataModule, ABC):
             raise Exception(
                 "Can't use more workers than 1 with positive samples due to statistic tracking inside workers"
             )
-
-        base_transforms = [
-            A.Resize(height=image_size[0], width=image_size[1], always_apply=True)
-        ]
-
-        # add normalize transform
-        if normalization == InputNormalizationMethod.IMAGENET:
-            base_transforms.append(
-                A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))
-            )
-        elif normalization == InputNormalizationMethod.NONE:
-            base_transforms.append(A.ToFloat(max_value=255))
-        else:
-            raise ValueError(f"Unknown normalization method: {normalization}")
-
-        base_transforms.append(ToTensorV2())
-
-        self.transform_train = A.Compose(
-            base_transforms,
-            additional_targets={"loss_mask": "mask"},
-        )
-
-        self.transform_eval = A.Compose(
-            base_transforms,
-            additional_targets={"loss_mask": "mask"},
-        )
+        self.transform_train = v2.Resize(size=image_size, antialias=True)
+        self.transform_eval = v2.Resize(size=image_size, antialias=True)
 
     @property
     def is_setup(self) -> bool:
@@ -142,14 +118,18 @@ class SSNDataModule(LightningDataModule, ABC):
             batch_size=self.train_batch_size,
             num_workers=self.num_workers,
             persistent_workers=persist,
+            pin_memory=True
         )
 
     def test_dataloader(self) -> EVAL_DATALOADERS:
-        """Get test dataloader."""
+        """Get test dataloader with persistent workers to avoid CPU bottlenecks."""
+        persist = self.num_workers > 0
         return DataLoader(
             dataset=self.test_data,
             shuffle=False,
             batch_size=self.eval_batch_size,
             num_workers=self.num_workers,
             collate_fn=collate_fn,
+            pin_memory=True,
+            persistent_workers=persist
         )

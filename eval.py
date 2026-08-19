@@ -2,8 +2,17 @@ import copy
 import json
 from pathlib import Path
 
+import shutil
+import matplotlib.pyplot as plt
+import seaborn as sns
+import numpy as np
+from sklearn.metrics import precision_recall_curve, confusion_matrix
+from sklearn.metrics import roc_curve, precision_score, recall_score, f1_score, roc_auc_score, average_precision_score
+import numpy as np
+
 import torch
-from anomalib.utils.metrics import AUROC, AUPRO
+from torchmetrics.classification import BinaryAUROC, BinaryAveragePrecision
+from anomalib.utils.metrics import AUPRO
 from torchmetrics import Metric, AveragePrecision
 from pytorch_lightning import LightningDataModule
 from tqdm import tqdm
@@ -18,7 +27,9 @@ from datamodules.visa import Visa
 from datamodules.ksdd2 import KSDD2
 from datamodules.sensum import Sensum
 from model.supersimplenet import SuperSimpleNet
-
+import argparse
+from torchvision.transforms import v2
+from common.calibration import piecewise_min_max_calibration
 
 @torch.no_grad()
 def eval(
@@ -30,44 +41,40 @@ def eval(
     normalize: bool = True,
     image_save_path: Path = None,
     score_save_path: Path = None,
+    weights_path: str = None,
 ):
     model.to(device)
     model.eval()
-
-    # for anomaly map max as image score
-    seg_image_metrics = {}
-
-    for m_name, metric in image_metrics.items():
-        metric.cpu()
-        metric.reset()
-
-        seg_image_metrics[f"seg-{m_name}"] = copy.deepcopy(metric)
-
-    for metric in pixel_metrics.values():
-        metric.cpu()
-        metric.reset()
+    
+    gpu_transforms = v2.Compose([
+        v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ]).to(device)
 
     test_loader = datamodule.test_dataloader()
     results = {
         "anomaly_map": [],
         "gt_mask": [],
         "score": [],
+        "logit": [],
         "seg_score": [],
         "label": [],
         "image_path": [],
         "mask_path": [],
     }
+    
     for batch in tqdm(test_loader, position=0, leave=True):
         image_batch = batch["image"].to(device)
+        image_batch = gpu_transforms(image_batch)
         anomaly_map, anomaly_score = model.forward(image_batch)
 
         anomaly_map = anomaly_map.detach().cpu()
         anomaly_score = anomaly_score.detach().cpu()
 
-        results["anomaly_map"].append(anomaly_map.detach().cpu())
+        results["anomaly_map"].append(anomaly_map)
         results["gt_mask"].append(batch["mask"].detach().cpu())
 
         results["score"].append(torch.sigmoid(anomaly_score))
+        results["logit"].append(anomaly_score)  # raw classification logit (ONNX output)
         results["seg_score"].append(
             anomaly_map.reshape(anomaly_map.shape[0], -1).max(dim=1).values
         )
@@ -76,84 +83,195 @@ def eval(
         results["image_path"].extend(batch["image_path"])
         results["mask_path"].extend(batch["mask_path"])
 
+    # Global concatenation
     results["anomaly_map"] = torch.cat(results["anomaly_map"])
     results["score"] = torch.cat(results["score"])
+    results["logit"] = torch.cat(results["logit"])
     results["seg_score"] = torch.cat(results["seg_score"])
     results["gt_mask"] = torch.cat(results["gt_mask"])
     results["label"] = torch.cat(results["label"])
 
-    # normalize
-    if normalize:
-        results["anomaly_map"] = (
-            results["anomaly_map"] - results["anomaly_map"].flatten().min()
-        ) / (
-            results["anomaly_map"].flatten().max()
-            - results["anomaly_map"].flatten().min()
-        )
-        results["score"] = (results["score"] - results["score"].min()) / (
-            results["score"].max() - results["score"].min()
-        )
-        results["seg_score"] = (results["seg_score"] - results["seg_score"].min()) / (
-            results["seg_score"].max() - results["seg_score"].min()
-        )
-
+    # Clean NaNs to safeguard the raw metrics
+    am_raw = torch.nan_to_num(results["anomaly_map"], nan=0.0)
+    score_raw = torch.nan_to_num(results["score"], nan=0.0)
+    seg_score_raw = torch.nan_to_num(results["seg_score"], nan=0.0)
+    
     results_dict = {}
-    for name, metric in image_metrics.items():
-        metric.update(results["score"], results["label"])
-        results_dict[name] = metric.to(device).compute().item()
-        metric.to("cpu")
 
-    for name, metric in seg_image_metrics.items():
-        metric.update(results["seg_score"], results["label"])
-        results_dict[name] = metric.to(device).compute().item()
-        metric.to("cpu")
+    # ==========================================
+    # --- SKLEARN RAW METRICS COMPUTATION ---
+    # ==========================================
+    y_true = results["label"].numpy()
+    y_scores = score_raw.numpy()
+    seg_scores = seg_score_raw.numpy()
 
-    for name, metric in pixel_metrics.items():
+    # Image-level Metrics (threshold-free, calcolate sui raw score)
+    results_dict["I-AUROC"] = float(roc_auc_score(y_true, y_scores))
+    results_dict["AP-det"] = float(average_precision_score(y_true, y_scores))
+    results_dict["seg-I-AUROC"] = float(roc_auc_score(y_true, seg_scores))
+    results_dict["seg-AP-det"] = float(average_precision_score(y_true, seg_scores))
+
+    fpr, tpr, thresholds = roc_curve(y_true, y_scores)
+    raw_img_th = float(thresholds[np.argmax(tpr - fpr)])
+
+    # Pixel-level Metrics (Subsampled by 10 to prevent system RAM overflow)
+    p_true = results["gt_mask"].flatten().numpy()
+    p_true = (p_true >= 0.5).astype(int)
+    p_scores = am_raw.flatten().numpy()
+
+    step = 10 
+    p_true_sub = p_true[::step]
+    p_scores_sub = p_scores[::step]
+
+    results_dict["P-AUROC"] = float(roc_auc_score(p_true_sub, p_scores_sub))
+    results_dict["AP-loc"] = float(average_precision_score(p_true_sub, p_scores_sub))
+
+    fpr_p, tpr_p, thresholds_p = roc_curve(p_true_sub, p_scores_sub)
+    raw_pix_th = float(thresholds_p[np.argmax(tpr_p - fpr_p)])
+
+    # --- Persist calibration sidecar for ONNX export (raw scales the graph emits) ---
+    # The exported anomaly_score is the raw classification LOGIT and the anomaly_map
+    # is the raw segmentation-logit map (sigmoid/piecewise calibration stay OUTSIDE
+    # the graph). raw_img_th is a sigmoid probability -> convert to a logit threshold;
+    # raw_pix_th is already on the raw map scale. With normalization_formula =
+    # anomalib_centered the downstream decision threshold is 0.5, reproducing this
+    # eval's operating point (Youden) per-image, without any test-set statistics.
+    if weights_path is not None:
+        import math
+        p = float(min(max(raw_img_th, 1e-6), 1.0 - 1e-6))  # clamp before logit
+        image_threshold_logit = math.log(p / (1.0 - p))
+        logits = results["logit"]
+        calib = {
+            "image_threshold_raw": image_threshold_logit,
+            "pixel_threshold_raw": float(raw_pix_th),
+            "score_min_raw": float(logits.min()),
+            "score_max_raw": float(logits.max()),
+            "map_min_raw": float(am_raw.min()),
+            "map_max_raw": float(am_raw.max()),
+            "normalization_formula": "anomalib_centered",
+            "calibration_split": "test",
+            "calibration_method": "youden",
+        }
+        calib_path = str(weights_path) + ".calib.json"
+        with open(calib_path, "w", encoding="utf-8") as f:
+            json.dump(calib, f, indent=2)
+        print(f"[calib] wrote sidecar: {calib_path}")
+
+    # Piecewise Min-Max Calibration (coerente con train.py::test())
+    if normalize:
+        print("Applying Piecewise Min-Max Calibration (Target TH: 0.5)...")
+        score_cal = piecewise_min_max_calibration(torch.from_numpy(y_scores), raw_img_th)
+        y_scores = score_cal.numpy()
+
+        am_cal = piecewise_min_max_calibration(torch.from_numpy(p_scores_sub), raw_pix_th)
+        p_scores_sub = am_cal.numpy()
+
+        best_threshold = 0.5
+        best_pixel_threshold = 0.5
+    else:
+        best_threshold = raw_img_th
+        best_pixel_threshold = raw_pix_th
+
+    # FIX: y_pred calcolato QUI, dopo che best_threshold esiste ed usando gli score calibrati
+    y_pred = (y_scores >= best_threshold).astype(int)
+    results_dict["Precision"] = float(precision_score(y_true, y_pred, zero_division=0))
+    results_dict["Recall"] = float(recall_score(y_true, y_pred, zero_division=0))
+    results_dict["F1-score"] = float(f1_score(y_true, y_pred, zero_division=0))
+
+    p_pred_sub = (p_scores_sub >= best_pixel_threshold).astype(int)
+    results_dict["Pixel-F1"] = float(f1_score(p_true_sub, p_pred_sub, zero_division=0))
+
+    # AUPRO (Requires spatial structure, utilizing TorchMetrics on GPU)
+    if "AUPRO" in pixel_metrics:
+        metric = pixel_metrics["AUPRO"]
+        metric.to(device)
         try:
-            # avoid nan in early stages
-            am = results["anomaly_map"]
-            am[am != am] = 0
-            results["anomaly_map"] = am
+            binary_mask = (results["gt_mask"] >= 0.5).type(torch.long).to(device)
+            metric.update(am_raw.to(device), binary_mask)
+            results_dict["AUPRO"] = metric.compute().item()
+        except Exception as e:
+            print(f"\n[!] Error computing AUPRO: {e}")
+            results_dict["AUPRO"] = 0.0
+        finally:
+            metric.to("cpu")
 
-            metric.update(
-                results["anomaly_map"], results["gt_mask"].type(torch.float32)
-            )
-            results_dict[name] = metric.to(device).compute().item()
-        except RuntimeError:
-            # AUPRO in some cases with early predictions crashes cuda, so just skip it in that case
-            results_dict[name] = 0
-        metric.to("cpu")
-
+    # ==========================================
+    # --- LOGGING & EXPORT ---
+    # ==========================================
+    print("\n--- EVALUATION RESULTS ---")
     for name, value in results_dict.items():
-        print(f"{name}: {value} ", end="")
-    print()
+        if isinstance(value, float):
+            print(f"{name}: {value:.4f} ", end="")
+        else:
+            print(f"{name}: {value} ", end="")
+    print(f"| Opt-Th: {best_threshold:.4f}\n")
+
+    # Confusion matrix at the ACTUAL decision threshold (0.5 when calibrated),
+    # i.e. the same operating point the exported model uses. This is consistent
+    # with Precision/Recall/F1 above (unlike compute_confusion_matrix, which
+    # re-derives an F1-max threshold on the raw scores).
+    _cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
+    _tn, _fp, _fn, _tp = _cm.ravel()
+    print(f"Confusion Matrix @ th={best_threshold:.4f}:  "
+          f"TN={_tn}  FP={_fp}  FN={_fn}  TP={_tp}")
+
+    # Save the confusion matrix as a seaborn heatmap (counts + row-percentages),
+    # at the same 0.5/Youden operating point the exported model uses.
+    cm_out_dir = Path(image_save_path or score_save_path or "./results")
+    cm_out_dir.mkdir(parents=True, exist_ok=True)
+    _row_sums = _cm.sum(axis=1, keepdims=True)
+    _cm_perc = np.divide(
+        _cm, _row_sums, out=np.zeros_like(_cm, dtype=float), where=_row_sums != 0
+    ) * 100.0
+    _annot = np.empty_like(_cm).astype(object)
+    for _i in range(_cm.shape[0]):
+        for _j in range(_cm.shape[1]):
+            _annot[_i, _j] = f"{_cm[_i, _j]}\n({_cm_perc[_i, _j]:.1f}%)"
+    plt.figure(figsize=(5.5, 4.5))
+    sns.heatmap(
+        _cm, annot=_annot, fmt="", cmap="Blues", cbar=True, square=True,
+        linewidths=0.5, linecolor="white",
+        xticklabels=["Good", "Anomaly"], yticklabels=["Good", "Anomaly"],
+    )
+    plt.xlabel("Predicted")
+    plt.ylabel("Ground Truth")
+    plt.title(f"Confusion Matrix (thr={best_threshold:.4f})")
+    plt.tight_layout()
+    _cm_path = cm_out_dir / "confusion_matrix.png"
+    plt.savefig(_cm_path, dpi=200, bbox_inches="tight")
+    plt.close()
+    print(f"[cm] saved confusion matrix: {_cm_path}")
 
     if image_save_path:
-        print("Visualizing")
+        print("Visualizing Anomaly Maps...")
+        eps = 1e-8
+        vis_anomaly_map = (am_raw - am_raw.flatten().min()) / (am_raw.flatten().max() - am_raw.flatten().min() + eps)
+        
+        vis_results = results.copy()
+        vis_results["anomaly_map"] = vis_anomaly_map
+        
         visualizer = Visualizer(image_save_path)
-        visualizer.visualize(results)
+        visualizer.visualize(
+            vis_results,
+            y_pred=y_pred,
+            best_threshold=best_threshold,
+            best_pixel_threshold=best_pixel_threshold
+        )
 
     score_dict = {}
     if score_save_path:
-        # save both segscore and score to json
         for img_path, score, seg_score, label in zip(
             results["image_path"],
-            results["score"],
-            results["seg_score"],
+            score_raw,
+            seg_score_raw,
             results["label"],
         ):
             img_path = Path(img_path)
-
             anomaly_type = img_path.parent.name
             if anomaly_type not in score_dict:
                 score_dict[anomaly_type] = {"good": {}, "bad": {}}
 
-            # since some datasets (sensum) can have same names in bad and good
-            if label == 1:
-                kind = "bad"
-            else:
-                kind = "good"
-
+            kind = "bad" if label == 1 else "good"
             score_dict[anomaly_type][kind][img_path.stem] = {
                 "score": score.item(),
                 "seg_score": seg_score.item(),
@@ -162,6 +280,8 @@ def eval(
         score_save_path.mkdir(exist_ok=True, parents=True)
         with open(score_save_path / "scores.json", "w") as f:
             json.dump(score_dict, f)
+        with open(score_save_path / "metrics.json", "w") as f:
+            json.dump(results_dict, f, indent=4)
 
     return results_dict
 
@@ -209,21 +329,9 @@ def get_mvtec(config):
     data = []
 
     categories = [
-        "screw",
-        "pill",
-        "capsule",
-        "carpet",
-        "grid",
-        "tile",
-        "wood",
-        "zipper",
-        "cable",
-        "toothbrush",
-        "transistor",
-        "metal_nut",
-        "bottle",
-        "hazelnut",
-        "leather",
+        "screw", "pill", "capsule", "carpet", "grid", "tile", "wood",
+        "zipper", "cable", "toothbrush", "transistor", "metal_nut",
+        "bottle", "hazelnut", "leather",
     ]
 
     for category in categories:
@@ -246,17 +354,8 @@ def get_visa(config):
     data = []
 
     categories = [
-        "candle",
-        "capsules",
-        "cashew",
-        "chewinggum",
-        "fryum",
-        "macaroni1",
-        "macaroni2",
-        "pcb1",
-        "pcb2",
-        "pcb3",
-        "pcb4",
+        "candle", "capsules", "cashew", "chewinggum", "fryum",
+        "macaroni1", "macaroni2", "pcb1", "pcb2", "pcb3", "pcb4",
         "pipe_fryum",
     ]
 
@@ -281,13 +380,10 @@ def get_avg(df):
     cat_avg = df.groupby("category").mean(numeric_only=True)
     total_avg = df.mean(axis=0, numeric_only=True).to_frame().T
     total_avg.index = ["total"]
-    combined = pd.concat([cat_avg, total_avg], axis=0)
-
-    return combined
+    return pd.concat([cat_avg, total_avg], axis=0)
 
 
 def get_std(df):
-    # take std of cat mean - this covers standard splits as well as CV for sensum
     cat_std = (
         df.groupby(["run_id", "category"])
         .mean(numeric_only=True)
@@ -300,22 +396,16 @@ def get_std(df):
     total_std = total_std.to_frame().T
     total_std.index = ["total"]
 
-    combined = pd.concat([cat_std, total_std], axis=0)
-
-    return combined
+    return pd.concat([cat_std, total_std], axis=0)
 
 
 def merge_csvs(dataset, run_ids, ratio, base_path):
-    # read all csv and merge into one
     joined = None
     for run_id in run_ids:
         file = base_path / str(run_id) / ratio / dataset / ("last.csv")
         print(file)
         df = pd.read_csv(file)
-        if joined is None:
-            joined = df
-        else:
-            joined = pd.concat([joined, df], axis=0)
+        joined = df if joined is None else pd.concat([joined, df], axis=0)
 
     return joined
 
@@ -332,13 +422,6 @@ def get_stats(dataset, run_ids, ratio, base_path):
 def generate_result_json(run_ids, datasets, ratios, res_path):
     """
     Generate json with mean and std for all passed datasets and run_ids.
-
-    Args:
-        run_ids: list of run_ids
-        datasets: list of datasets
-        ratios: list of ratios for each datasets
-        res_path: root path of results (csvs)
-
     """
     res_json = {"avg": {}, "std": {}}
 
@@ -359,30 +442,67 @@ def generate_result_json(run_ids, datasets, ratios, res_path):
     with open("./res_json/ssn.json", "w") as f:
         json.dump(res_json, f)
 
+def compute_confusion_matrix(results, image_save_path):
+    """Chiamata solo a fine training, non durante la validazione."""
+    print("Generating Confusion Matrix and Separating Images...")
+    y_true = results["label"].numpy()
+    y_scores = results["score"].numpy()
+
+    precision, recall, thresholds = precision_recall_curve(y_true, y_scores)
+    f1_scores = 2 * (precision * recall) / (precision + recall + 1e-8)
+    best_threshold_idx = np.argmax(f1_scores)
+    best_threshold = thresholds[best_threshold_idx] if best_threshold_idx < len(thresholds) else thresholds[-1]
+
+    y_pred = (y_scores >= best_threshold).astype(int)
+
+    classification_dir = image_save_path / "classification"
+    classification_dir.mkdir(exist_ok=True, parents=True)
+
+    cm = confusion_matrix(y_true, y_pred)
+    plt.figure(figsize=(6, 5))
+    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
+                xticklabels=["Good (0)", "Anomaly (1)"],
+                yticklabels=["Good (0)", "Anomaly (1)"])
+    plt.xlabel("Predicted Label")
+    plt.ylabel("True Label")
+    plt.title(f"Confusion Matrix (Threshold: {best_threshold:.3f})")
+    plt.tight_layout()
+    plt.savefig(classification_dir / "confusion_matrix.png")
+    plt.close()
+
+    for cat in ["TP", "TN", "FP", "FN"]:
+        (classification_dir / cat).mkdir(exist_ok=True, parents=True)
+
+    for img_path_str, true_lbl, pred_lbl in zip(results["image_path"], y_true, y_pred):
+        img_path = Path(img_path_str)
+        if true_lbl == 1 and pred_lbl == 1:
+            dest_folder = "TP"
+        elif true_lbl == 0 and pred_lbl == 0:
+            dest_folder = "TN"
+        elif true_lbl == 0 and pred_lbl == 1:
+            dest_folder = "FP"
+        else:
+            dest_folder = "FN"
+        shutil.copy(img_path, classification_dir / dest_folder / img_path.name)
+
+    print(f"Classification separated in: {classification_dir}")
+
 
 def run_eval(datasets, ratios, run_id, res_path):
     """
     Evaluate the performance for given datasets for checkpoints with run_id.
-
-    Args:
-        datasets: list of dataset names
-        ratios: ratio of labeled images for each dataset passed
-        run_id: run_id of checkpoints to be used
-        res_path: path to where  results csv will be saved
     """
     config = {
         "weights_path": Path(r"./weights"),
         "datasets_folder": Path(r"./datasets"),
         "results_save_path": res_path,
-        "image_save_path": None,  # set to save images
-        "score_save_path": None,  # set to save scores
+        "image_save_path": None,
+        "score_save_path": None,
         "seed": 42,
         "batch": 8,
         "num_workers": 0,
         "run_id": str(run_id),
-        # "ratio": "1", # configured below in the loop if using extended version
-        "adapt_cls_feat": False,  # (JIMS extension) cls features are not adapted
-        # "adapt_cls_feat": True,
+        "adapt_cls_feat": False,
     }
     data_functions = {
         "sensum": get_sensum,
@@ -398,14 +518,8 @@ def run_eval(datasets, ratios, run_id, res_path):
 
         results_writer = ResultsWriter(
             metrics=[
-                "AP-det",
-                "AP-loc",
-                "P-AUROC",
-                "I-AUROC",
-                "AUPRO",
-                "seg-AP-det",
-                "seg-I-AUROC",
-                "run_id",
+                "AP-det", "AP-loc", "P-AUROC", "I-AUROC", "AUPRO",
+                "seg-AP-det", "seg-I-AUROC", "run_id",
             ]
         )
 
@@ -423,22 +537,23 @@ def run_eval(datasets, ratios, run_id, res_path):
             model.load_model(weight_path)
 
             image_metrics = {
-                "I-AUROC": AUROC(),
-                "AP-det": AveragePrecision(num_classes=1),
+                "I-AUROC": BinaryAUROC(thresholds=100),
+                "AP-det": BinaryAveragePrecision(thresholds=100),
             }
             pixel_metrics = {
-                "P-AUROC": AUROC(),
-                "AP-loc": AveragePrecision(num_classes=1),
-                "AUPRO": AUPRO(),  # aupro calculation can be slow, and it requires some gpu memory
+                "P-AUROC": BinaryAUROC(thresholds=100),
+                "AP-loc": BinaryAveragePrecision(thresholds=100),
+                "AUPRO": AUPRO(),
             }
 
             results = eval(
                 model=model,
                 datamodule=datamodule,
-                device="cuda",
+                device="cuda" if torch.cuda.is_available() else "cpu",
                 image_metrics=image_metrics,
                 pixel_metrics=pixel_metrics,
                 normalize=True,
+                weights_path=weight_path,
                 score_save_path=config["score_save_path"]
                 / config["run_id"]
                 / dataset
@@ -456,8 +571,11 @@ def run_eval(datasets, ratios, run_id, res_path):
             )
             results["run_id"] = config["run_id"]
 
+            if config["image_save_path"]:
+                save_path = config["image_save_path"] / config["run_id"] / dataset / cat / config["ratio"]
+                compute_confusion_matrix(results, save_path)
+
             if dataset == "sensum":
-                # for sensum remove fold num when saving
                 res_cat = cat[:-2]
             else:
                 res_cat = cat
@@ -473,17 +591,108 @@ def run_eval(datasets, ratios, run_id, res_path):
             )
 
 
-if __name__ == "__main__":
-    datasets = ["mvtec", "visa", "ksdd2", "sensum"]
-    ratios = ["1", "1", "246", "1"]  # set ratios according to the datasets
-    # ratios = ["", "", "", ""]           # for ICPR (also set the adapt_cls_feat to True in config above!!!)
+def parse_args():
+    parser = argparse.ArgumentParser(description="Evaluate SSN on a specific checkpoint")
+    
+    parser.add_argument("weights_path", type=str, help="Path to the trained weights file (.pt/.pth)")
+    
+    parser.add_argument("--dataset", type=str, default="mvtec", help="Dataset name")
+    parser.add_argument("--category", type=str, required=True, help="Defect category (e.g., custom_no_dust)")
+    parser.add_argument("--datasets_folder", type=str, required=True, help="Root folder of datasets")
+    parser.add_argument("--data_path", type=str, required=False, help="Alias for datasets_folder")
+    parser.add_argument("--results_save_path", type=str, default="./results", help="Where to save eval outputs")
+    
+    parser.add_argument("--image_size", type=int, nargs=2, default=[512, 512])
+    parser.add_argument("--batch", type=int, default=4)
+    parser.add_argument("--num_workers", type=int, default=2)
+    parser.add_argument("--backbone", type=str, default="wide_resnet50_2")
+    parser.add_argument("--layers", type=str, nargs="+", default=["layer2", "layer3"])
+    parser.add_argument("--patch_size", type=int, default=3)
+    parser.add_argument("--seed", type=int, default=456654, help="Global random seed") 
+    
+    return parser.parse_args()
 
-    res_path = Path("./eval_res")
-    run_eval(datasets=datasets, ratios=ratios, run_id=0, res_path=res_path)
-    # to get mean and std of multiple runs, specify them with run_ids
-    generate_result_json(
-        run_ids=["0"],
-        datasets=datasets,
-        ratios=ratios,
-        res_path=res_path,
+def main():
+    args = parse_args()
+    
+    if args.data_path and not args.datasets_folder:
+        args.datasets_folder = args.data_path
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    config = {
+        "dataset": args.dataset,
+        "category": args.category,
+        "datasets_folder": Path(args.datasets_folder),
+        "results_save_path": Path(args.results_save_path),
+        "image_size": tuple(args.image_size),
+        "batch": args.batch,
+        "num_workers": args.num_workers,
+        "backbone": args.backbone,
+        "layers": args.layers,
+        "patch_size": args.patch_size,
+        "seed": args.seed,
+        "adapt_cls_feat": True,
+    }
+
+    print(f"\n--- Starting Evaluation for {args.dataset} - {args.category} ---")
+    print(f"Loading weights from: {args.weights_path}")
+
+    model = SuperSimpleNet(image_size=config["image_size"], config=config)
+    model.load_model(Path(args.weights_path))
+
+    if args.dataset == "mvtec":
+        datamodule = MVTec(
+            root=config["datasets_folder"],
+            category=config["category"],
+            image_size=config["image_size"],
+            train_batch_size=config["batch"],
+            eval_batch_size=config["batch"],
+            num_workers=config["num_workers"],
+            seed=config["seed"],
+            supervision=Supervision.MIXED_SUPERVISION 
+        )
+    elif args.dataset == "visa":
+         datamodule = Visa(
+            root=config["datasets_folder"] / "visa",
+            category=config["category"],
+            image_size=config["image_size"],
+            train_batch_size=config["batch"],
+            eval_batch_size=config["batch"],
+            num_workers=config["num_workers"],
+            seed=config["seed"]
+        )
+    else:
+         raise NotImplementedError(f"Dataset {args.dataset} evaluation not implemented via CLI.")
+         
+    datamodule.setup()
+
+    image_metrics = {
+        "I-AUROC": BinaryAUROC(thresholds=100),
+        "AP-det": BinaryAveragePrecision(thresholds=100),
+    }
+    pixel_metrics = {
+        "P-AUROC": BinaryAUROC(thresholds=100),
+        "AP-loc": BinaryAveragePrecision(thresholds=100),
+        "AUPRO": AUPRO(),
+    }
+
+    image_save_path = config["results_save_path"] / "visual_eval" / config["dataset"] / config["category"]
+    score_save_path = config["results_save_path"] / "scores_eval" / config["dataset"] / config["category"]
+
+    results = eval(
+        model=model,
+        datamodule=datamodule,
+        device=device,
+        image_metrics=image_metrics,
+        pixel_metrics=pixel_metrics,
+        normalize=True,
+        image_save_path=image_save_path,
+        score_save_path=score_save_path,
+        weights_path=args.weights_path,
     )
+
+    print(f"Evaluation completed. Results saved in {args.results_save_path}")
+
+if __name__ == "__main__":
+    main()

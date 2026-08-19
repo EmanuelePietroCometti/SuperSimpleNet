@@ -14,7 +14,9 @@ def rand_perlin_2d(shape, res, fade=lambda t: 6 * t**5 - 15 * t**4 + 10 * t**3):
     grid = (
         torch.stack(
             torch.meshgrid(
-                torch.arange(0, res[0], delta[0]), torch.arange(0, res[1], delta[1])
+                torch.arange(0, res[0], delta[0]),
+                torch.arange(0, res[1], delta[1]),
+                indexing="ij",
             ),
             dim=-1,
         )

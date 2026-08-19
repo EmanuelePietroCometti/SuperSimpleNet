@@ -5,6 +5,13 @@ anomalib==0.7
 # optional
 #wandb
 
---extra-index-url https://download.pytorch.org/whl/cu118
-torch==2.1.0+cu118
-torchvision==0.16.0+cu118
+# ONNX export (export_onnx.py)
+onnx
+onnxscript
+onnxruntime          # required for --precision int8
+onnxconverter-common # required for --precision fp16
+
+--extra-index-url https://download.pytorch.org/whl/cu124
+torch==2.6.0+cu124
+torchvision==0.21.0+cu124
+torchaudio==2.6.0+cu124
