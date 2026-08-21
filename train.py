@@ -525,7 +525,7 @@ def train_and_eval(model, datamodule, config, device):
         "AP-loc": BinaryAveragePrecision(thresholds=100),
     }
 
-    train(
+    results = train(
         model=model,
         epochs=config["epochs"],
         datamodule=datamodule,
@@ -551,28 +551,6 @@ def train_and_eval(model, datamodule, config, device):
         )
     except Exception as e:
         print("Error saving checkpoint" + str(e))
-
-    results = test(
-        model=model,
-        test_loader=datamodule.test_dataloader(),
-        device=device,
-        config=config,
-        image_metrics=image_metrics,
-        pixel_metrics=pixel_metrics,
-        normalize=True,
-        image_save_path=Path(config["results_save_path"])
-        / config["setup_name"]
-        / "visual"
-        / config["dataset"]
-        / config["category"]
-        / str(config["ratio"]),
-        score_save_path=Path(config["results_save_path"])
-        / config["setup_name"]
-        / "scores"
-        / config["dataset"]
-        / config["category"]
-        / str(config["ratio"]),
-    )
 
     return results
 
