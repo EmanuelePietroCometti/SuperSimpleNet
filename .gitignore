@@ -82,5 +82,6 @@ fixtures/
 results/
 checkpoints/
 export/
-ablation_*
 configs/
+ablation_*
+results_old
