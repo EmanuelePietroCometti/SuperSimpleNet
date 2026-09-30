@@ -84,3 +84,4 @@ checkpoints/
 export/
 configs/
 ablation_*
+results_old

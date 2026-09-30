@@ -1,5 +1,5 @@
 @echo off
-setlocal
+setlocal enabledelayedexpansion
 
 REM ==========================================================
 REM  SuperSimpleNet - configurazione standard
@@ -7,23 +7,25 @@ REM  Output: results\ssn_<classe>\seed_<seed>\...
 REM ==========================================================
 
 REM Classi e seed
-set "classes=carpet reda_baseline reda_dustOnValidation reda_dustOnValidationAndTrain"
+set "classes=carpet tessuto_nero tessuto_nero_dust_validation tessuto_nero_dust_train"
 set "seeds=0 1 2 42 101"
 
 REM Paradigma: sup (mixed supervision, default di train.py) oppure unsup
 set "MODE=sup"
 
-set "DATA_ROOT=mvtec"
+set "DATA_ROOT=D:\emanuele\Code\dataset"
 set "RESULTS_ROOT=results"
 
 for %%c in (%classes%) do (
     for %%s in (%seeds%) do (
+        set "MODE=sup"
+        if /i "%%c"=="carpet" set "MODE=unsup"
         echo ==========================================================
-        echo Starting run -^> Class: %%c ^| Seed: %%s ^| Project: ssn_%%c
+        echo Starting run -^> Class: %%c ^| Seed: %%s ^| Mode: !MODE!
         echo ==========================================================
 
         python train.py ^
-            --mode %MODE% ^
+            --mode !MODE! ^
             --dataset mvtec ^
             --category %%c ^
             --datasets_folder %DATA_ROOT% ^
@@ -35,7 +37,7 @@ for %%c in (%classes%) do (
             --image_size 256 256 ^
             --perlin_thr 0.2 ^
             --noise_std 0.015 ^
-            --epochs 100 ^
+            --epochs 300 ^
             --batch 4 ^
             --seg_lr 0.0002 ^
             --dec_lr 0.0002 ^
@@ -44,7 +46,7 @@ for %%c in (%classes%) do (
             --gamma 0.4 ^
             --eval_step_size 5 ^
             --th 0.5 ^
-            --num_workers 4
+            --num_workers 1
 
         if errorlevel 1 (
             echo [ERRORE] Run fallita -^> Class: %%c ^| Seed: %%s
