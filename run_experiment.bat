@@ -44,7 +44,7 @@ for %%c in (%classes%) do (
             --adapt_lr 0.0001 ^
             --patch_size 3 ^
             --gamma 0.4 ^
-            --eval_step_size 5 ^
+            --eval_step_size 20 ^
             --th 0.5 ^
             --num_workers 1
 
