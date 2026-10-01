@@ -4,10 +4,11 @@ setlocal enabledelayedexpansion
 REM ==========================================================
 REM  SuperSimpleNet - configurazione standard
 REM  Output: results\ssn_<classe>\seed_<seed>\...
+REM  Dopo ogni training parte eval.py sul checkpoint
 REM ==========================================================
 
 REM Classi e seed
-set "classes=carpet tessuto_nero tessuto_nero_dust_validation tessuto_nero_dust_train"
+set "classes=tessuto_nero_dust_train"
 set "seeds=0 1 2 42 101"
 
 REM Paradigma: sup (mixed supervision, default di train.py) oppure unsup
@@ -52,6 +53,29 @@ for %%c in (%classes%) do (
             echo [ERRORE] Run fallita -^> Class: %%c ^| Seed: %%s
         ) else (
             echo Finished run -^> Class: %%c ^| Seed: %%s
+
+            set "CKPT=%RESULTS_ROOT%\ssn_%%c\seed_%%s\checkpoints\mvtec\%%c\1\weights.pt"
+            if exist "!CKPT!" (
+                echo Starting eval -^> Class: %%c ^| Seed: %%s
+                python eval.py ^
+                    "!CKPT!" ^
+                    --dataset mvtec ^
+                    --category %%c ^
+                    --datasets_folder %DATA_ROOT% ^
+                    --results_save_path %RESULTS_ROOT%\ssn_%%c\seed_%%s ^
+                    --image_size 256 256 ^
+                    --batch 4 ^
+                    --num_workers 1 ^
+                    --seed %%s
+
+                if errorlevel 1 (
+                    echo [ERRORE] Eval fallita -^> Class: %%c ^| Seed: %%s
+                ) else (
+                    echo Finished eval -^> Class: %%c ^| Seed: %%s
+                )
+            ) else (
+                echo [ATTENZIONE] Checkpoint non trovato -^> !CKPT!
+            )
         )
         echo.
     )
