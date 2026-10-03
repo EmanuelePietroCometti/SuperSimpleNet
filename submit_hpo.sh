@@ -16,6 +16,7 @@
 #   TIME=48:00:00                 walltime per job (default: quello di hpo.sbatch)
 #   PARTITION=gpu_a40_ext         partizione (default: gpu_a40, max 24h; la _ext arriva a 120h: con
 #                                 TIME=120:00:00 bastano meno job accodati, es. TUNE_CHAIN=1)
+#   SSN_ENV=$HOME/env_ssn         ambiente Python da usare (default: ~/env_ema_tesi); va esportato anche per hpo.sbatch
 #   EXCLUDE=compute-4-13          nodi da escludere (es. uno che fallisce sempre con JobLaunchFailure)
 #   SCREEN_ARCHS="resnet18-layer1_2 ..."   sottoinsieme dello stadio A (default: tutte e 12)
 #   RUN_TAG=smoke                 campagna separata (altri DB, altre cartelle), per i test
@@ -23,12 +24,12 @@
 MODE=$1
 CAT=$2
 if [ -z "$CAT" ]; then
-    sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'
     exit 1
 fi
 
 cd "$(dirname "$(readlink -f "$0")")" || exit 1
-export PATH="$HOME/env_ema_tesi/bin:$PATH"
+export PATH="${SSN_ENV:-$HOME/env_ema_tesi}/bin:$PATH"
 export HPO_ARGS RUN_TAG
 mkdir -p logs
 

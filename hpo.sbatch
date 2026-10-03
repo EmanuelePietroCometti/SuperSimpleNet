@@ -40,9 +40,13 @@ LIVE=$STATE_ROOT/$TAGGED            # DB "vivo" (su scratch): lo scrive solo que
 MIRROR=$REPO/hpo_runs/$TAGGED       # in home: istantanee del DB, marker .done, risultati
 DB=$LIVE/$NAME.db
 WORK=${SCRATCH_FLASH:-${TMPDIR:-/tmp}}/ssn_hpo_work/${TAGGED}_${NAME}_$SLURM_JOB_ID
-mkdir -p "$LIVE" "$MIRROR" "$WORK/datasets" "$WORK/results"
+mkdir -p "$LIVE" "$MIRROR" "$WORK/datasets" "$WORK/results" || {
+    echo "[$NAME] ERRORE: non riesco a creare cartelle su scratch ($LIVE, $WORK) sul nodo $(hostname)."
+    echo "[$NAME] SCRATCH_FLASH='$SCRATCH_FLASH': non esiste o non e' scrivibile da questo nodo."
+    exit 5
+}
 
-export PATH="$HOME/env_ema_tesi/bin:$PATH"
+export PATH="${SSN_ENV:-$HOME/env_ema_tesi}/bin:$PATH"
 IFS=' ' read -r -a EXTRA <<< "$HPO_ARGS"
 
 echo "[$NAME] categoria=$TAGGED job=$SLURM_JOB_ID nodo=$(hostname) $(date)"
@@ -101,7 +105,8 @@ EOF
 nvidia-smi --query-gpu=name,memory.total --format=csv
 
 # la sola categoria necessaria, copiata su scratch
-cp -r "$DATA_HOME/$CAT" "$WORK/datasets/" || { echo "[$NAME] dataset non trovato in $DATA_HOME/$CAT"; exit 3; }
+[ -d "$DATA_HOME/$CAT" ] || { echo "[$NAME] dataset non trovato in $DATA_HOME/$CAT"; exit 3; }
+cp -r "$DATA_HOME/$CAT" "$WORK/datasets/" || { echo "[$NAME] copia del dataset in $WORK/datasets fallita"; exit 3; }
 
 if [ "$ROLE" = screen ]; then
     ARGS=(--stage screen --screen_archs "$UNIT")
