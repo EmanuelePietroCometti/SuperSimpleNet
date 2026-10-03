@@ -16,13 +16,14 @@
 #   TIME=48:00:00                 walltime per job (default: quello di hpo.sbatch)
 #   PARTITION=gpu_a40_ext         partizione (default: gpu_a40, max 24h; la _ext arriva a 120h: con
 #                                 TIME=120:00:00 bastano meno job accodati, es. TUNE_CHAIN=1)
+#   EXCLUDE=compute-4-13          nodi da escludere (es. uno che fallisce sempre con JobLaunchFailure)
 #   SCREEN_ARCHS="resnet18-layer1_2 ..."   sottoinsieme dello stadio A (default: tutte e 12)
 #   RUN_TAG=smoke                 campagna separata (altri DB, altre cartelle), per i test
 
 MODE=$1
 CAT=$2
 if [ -z "$CAT" ]; then
-    sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
     exit 1
 fi
 
@@ -45,7 +46,7 @@ TOP_K=${TOP_K:-3}
 submit() {  # submit <nome> <dipendenza|""> <argomenti di hpo.sbatch>  ->  stampa l'ID del job
     local name=$1 dep=$2 out
     shift 2
-    out=$(sbatch --parsable --job-name="$name" ${TIME:+--time="$TIME"} ${PARTITION:+--partition="$PARTITION"} ${dep:+--dependency="$dep"} hpo.sbatch "$@") \
+    out=$(sbatch --parsable --job-name="$name" ${TIME:+--time="$TIME"} ${PARTITION:+--partition="$PARTITION"} ${EXCLUDE:+--exclude="$EXCLUDE"} ${dep:+--dependency="$dep"} hpo.sbatch "$@") \
         || { echo "sbatch fallito per $name" >&2; exit 1; }
     echo "${out%%;*}"
 }
