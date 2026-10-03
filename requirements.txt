@@ -21,3 +21,4 @@ scikit-learn
 
 wandb
 setuptools<81
+optuna
