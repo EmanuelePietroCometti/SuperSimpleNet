@@ -374,9 +374,10 @@ def setup_gpu(args) -> None:
 
 def recover_stale(study: optuna.Study) -> None:
     """Un run interrotto lascia trial RUNNING nel DB: li chiude come FAIL."""
-    for t in study.get_trials(deepcopy=False):
+    for t in list(study.get_trials(deepcopy=False)):
         if t.state == TrialState.RUNNING:
             study.tell(t.number, state=TrialState.FAIL)
+            study.enqueue_trial(t.params)  # riesegue il trial interrotto con gli stessi parametri
             print(f"[{study.study_name}] trial {t.number} era rimasto RUNNING -> FAIL")
 
 
@@ -513,7 +514,8 @@ def run_tune(args, archs) -> None:
         )
         recover_stale(study)
         warm_start(study, args, arch)
-        done = sum(1 for t in study.trials if t.state.is_finished() and not t.user_attrs.get("from_screening"))
+        done = sum(1 for t in study.trials
+                   if t.state in (TrialState.COMPLETE, TrialState.PRUNED) and not t.user_attrs.get("from_screening"))
         remaining = args.n_trials - done
         if remaining <= 0:
             print(f"[{arch}] gia' {done} trial nuovi, salto")
